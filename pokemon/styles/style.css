@@ -27,10 +27,5 @@ html, body {
   height: auto;
 }
 
-#hint {
-  font-size: 13px;
-  letter-spacing: 0.5px;
-  opacity: 0.8;
-}
-
+#hint { font-size: 13px; letter-spacing: 0.5px; opacity: 0.8; }
 #hint b { color: #8fb6ff; }

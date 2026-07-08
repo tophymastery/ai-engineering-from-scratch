@@ -1,0 +1,60 @@
+/* Main entry point: wires modules together, runs the update/render loop, and
+ * exposes a test hook (window.__shapemon) used by the automated test suite. */
+import { ctx } from "./core/screen.js";
+import { setRng } from "./core/rng.js";
+import { CONFIG } from "./data/config.js";
+import { STATE, game, player, flags, battle } from "./state.js";
+import { MAPS, WARPS, NPCS, DOORS, isBlocked, tileAt, isEncounterTile } from "./data/maps.js";
+import { SPECIES } from "./data/species.js";
+import { MOVES } from "./data/moves.js";
+import { ITEMS } from "./data/items.js";
+import { ENCOUNTERS } from "./data/encounters.js";
+import { typeEffectiveness } from "./data/types.js";
+import { calcStat, expForLevel, levelForExp, gainExp, expYield } from "./engine/stats.js";
+import { calcDamage } from "./engine/damage.js";
+import { makeCreature, makeMove, makeParty } from "./engine/creature.js";
+import { tryMove, updateMovement, doWarp } from "./engine/world.js";
+import { startWildBattle, startGymBattle, startTrainerBattle, doTurn, updateBattleAnim } from "./engine/battle.js";
+import { healParty } from "./engine/party.js";
+import { newGame, continueGame, hasSave, saveGame } from "./engine/save.js";
+import { renderWorld } from "./render/world_render.js";
+import { renderBattle } from "./render/battle_render.js";
+import { renderTitle, renderCredits } from "./render/scenes.js";
+import { keys, onPress, initInput } from "./input.js";
+
+function update() {
+  game.tick++;
+  if (game.state === STATE.WORLD && !player.moving) {
+    for (const d of ["up", "down", "left", "right"]) if (keys.has(d)) { tryMove(d); break; }
+  }
+  updateMovement();
+  if (game.state === STATE.BATTLE) updateBattleAnim();
+}
+
+function render() {
+  if (game.state === STATE.TITLE) return renderTitle();
+  if (game.state === STATE.CREDITS) return renderCredits();
+  if (game.state === STATE.BATTLE) return renderBattle();
+  renderWorld();
+}
+
+function frame() { update(); render(); requestAnimationFrame(frame); }
+
+// ---- Test / automation hook ----
+window.__shapemon = {
+  STATE, game, player, flags, battle,
+  MAPS, WARPS, NPCS, DOORS, SPECIES, MOVES, ITEMS, ENCOUNTERS,
+  api: { calcStat, calcDamage, typeEffectiveness, expForLevel, levelForExp, gainExp, expYield, makeCreature, makeMove, makeParty },
+  isBlocked, tileAt: (m, x, y) => tileAt(MAPS[m], x, y), isEncounterTile,
+  setRng,
+  setForceEncounter: (v) => { game.forceEncounter = !!v; },
+  setNoEncounter: (v) => { game.noEncounter = !!v; },
+  giveStarter: () => { flags.hasStarter = true; player.party = [makeCreature(CONFIG.starter.species, CONFIG.starter.level)]; },
+  healParty, warpTo: doWarp,
+  startWildBattle: () => startWildBattle(ENCOUNTERS.town), startGymBattle, startTrainerBattle, doTurn,
+  newGame, continueGame, hasSave, saveGame,
+  press: onPress,
+};
+
+initInput();
+requestAnimationFrame(frame);
