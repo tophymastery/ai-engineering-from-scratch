@@ -27,6 +27,8 @@ const S = (page) => page.evaluate(() => {
 });
 const settle = (page) => page.waitForFunction("!window.__shapemon.player.moving", { timeout: 4000 }).catch(() => {});
 const wait = (page, ms) => page.waitForTimeout(ms);
+const shot = (page, name) => page.screenshot({ path: path.join(shots, name + ".png") });
+const curLine = (page) => page.evaluate(() => window.__shapemon.battle.msg[window.__shapemon.battle.msgIndex] || "");
 
 async function tap(page, key) { await page.keyboard.press(CODE[key]); await wait(page, 40); }
 async function stepDir(page, dir) {
@@ -118,6 +120,26 @@ async function winBattle(page) {
   return S(page);
 }
 
+// Fight to a win; when the current message contains `needle`, capture `name`.
+async function winCapturing(page, name, needle) {
+  let captured = false;
+  for (let i = 0; i < 500; i++) {
+    const st = await S(page);
+    if (st.gstate !== "battle") break;
+    if (!captured && (await curLine(page)).toLowerCase().includes(needle)) { await shot(page, name); captured = true; }
+    if (st.phase === "moves") {
+      const info = await page.evaluate(() => {
+        const s = window.__shapemon, b = s.battle; let bi = 0, best = -1;
+        b.ally.moves.forEach((m, idx) => { const r = s.api.calcDamage(b.ally, b.enemy, m, { forceCrit: false, rand: 100 }); if (r.dmg > best) { best = r.dmg; bi = idx; } });
+        return { bi, cur: b.moveIndex, n: b.ally.moves.length };
+      });
+      for (let k = 0; k < (info.bi - info.cur + info.n) % info.n; k++) await tap(page, "down");
+      await tap(page, "z");
+    } else await tap(page, "z");
+  }
+  return captured;
+}
+
 (async () => {
   const server = createServer().listen(0);
   const port = server.address().port;
@@ -190,6 +212,43 @@ async function winBattle(page) {
   await walkTo(page, 7, 9);
   ok("exited Cave to town", (await S(page)).map === "town");
 
+  // 7b) DIALOG: talk to a villager (the Kid at 10,41), approached from above.
+  await page.evaluate(() => window.__shapemon.setNoEncounter(true));
+  await walkTo(page, 10, 40);
+  await talkTo(page, "down");
+  ok("villager dialog opened", (await S(page)).gstate === "dialog");
+  await shot(page, "10-dialog-npc");
+  await clearDialog(page);
+
+  // 7c) TRAINER battle: challenge Camper Rick (17,19).
+  await walkTo(page, 17, 20);
+  await talkTo(page, "up");
+  await clearDialog(page);   // intro -> trainer battle
+  ok("trainer battle started", (await S(page)).gstate === "battle");
+  await shot(page, "11-trainer-battle");
+  const moneyBeforeTrainer = (await S(page)).money;
+  await winBattle(page);
+  await clearDialog(page);   // victory line
+  ok("trainer win paid prize money", (await S(page)).money > moneyBeforeTrainer);
+
+  // 7d) SHOP: enter the Mart, talk to the clerk, buy a Potion.
+  await page.evaluate(() => window.__shapemon.healParty());
+  await walkTo(page, DOORS.M.x, DOORS.M.y);
+  ok("entered the Mart", (await S(page)).map === "mart");
+  await walkTo(page, 6, 3);
+  await talkTo(page, "up");
+  await clearDialog(page);   // clerk welcome -> SHOP screen
+  ok("shop screen opened", (await S(page)).gstate === "shop");
+  await shot(page, "12-shop");
+  const moneyBeforeBuy = (await S(page)).money;
+  const potBeforeBuy = await page.evaluate(() => window.__shapemon.itemQty("potion"));
+  await tap(page, "z");   // buy the highlighted item (Potion)
+  ok("buying spent money", (await S(page)).money < moneyBeforeBuy);
+  ok("buying added the item", (await page.evaluate(() => window.__shapemon.itemQty("potion"))) === potBeforeBuy + 1);
+  await tap(page, "x");   // leave shop
+  await walkTo(page, 6, 8);
+  ok("exited the Mart", (await S(page)).map === "town");
+
   // 8) Tall-grass random encounter (forced), then win the wild battle + level up.
   await page.evaluate(() => {
     const s = window.__shapemon;
@@ -209,39 +268,66 @@ async function winBattle(page) {
   // helper: advance an intro/anim battle to the command menu
   const toMenu = async () => { for (let i = 0; i < 30; i++) { const s = await S(page); if (s.gstate !== "battle" || s.phase === "menu") return; await tap(page, "z"); } };
 
-  // 9) ITEM use in battle: heal the active creature with a Potion.
+  // 9) ITEM use in battle: capture the command / move / bag menus + item use.
   await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.setRng(() => 0.9); s.healParty(); s.player.party[0].hp = 4; s.startWildBattle(); });
   await toMenu();
+  await shot(page, "13-battle-command");   // 2x2 FIGHT/PACK/PKMN/RUN
+  await tap(page, "z"); await shot(page, "14-battle-moves");   // FIGHT -> move list
+  await tap(page, "x");                     // back to command menu
   const potBefore = await page.evaluate(() => window.__shapemon.itemQty("potion"));
-  await tap(page, "right");            // FIGHT -> PACK
-  await tap(page, "z");                // open bag
-  await tap(page, "z");                // use first item (Potion) on the active creature
+  await tap(page, "right"); await tap(page, "z");   // PACK -> open bag
+  await shot(page, "15-battle-bag");
+  await tap(page, "z");                     // use Potion on the active creature
   await toMenu();
   const potAfter = await page.evaluate(() => window.__shapemon.itemQty("potion"));
   ok("item use consumed a Potion", potAfter === potBefore - 1);
-  ok("Potion changed the creature's HP", (await S(page)).exp !== null);   // battle still valid
   await winBattle(page);
 
-  // 10) CATCH a wild creature with a ball.
+  // 10) CATCH a wild creature with a ball (capture the "Gotcha!" moment).
   await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.01); s.startWildBattle(); s.battle.enemy.hp = 1; });
   await toMenu();
   const partyBefore = (await S(page)).party;
   await tap(page, "right"); await tap(page, "z");   // open bag
   await tap(page, "down");                          // move to a ball (Snarebell)
   await tap(page, "z");                             // throw it
-  for (let i = 0; i < 12; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); }
+  let caughtShot = false;
+  for (let i = 0; i < 14; i++) {
+    if ((await S(page)).gstate !== "battle") break;
+    if (!caughtShot && (await curLine(page)).toLowerCase().includes("gotcha")) { await shot(page, "16-catch"); caughtShot = true; }
+    await tap(page, "z");
+  }
   ok("caught creature joined the party", (await S(page)).party === partyBefore + 1);
+  ok("captured the catch moment", caughtShot);
 
-  // 11) SWITCH the active creature mid-battle.
+  // 11) SWITCH the active creature mid-battle (capture the party menu).
   await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); s.player.party.push(s.api.makeCreature("wormling", 6)); s.startWildBattle(); });
   await toMenu();
   const activeBefore = await page.evaluate(() => window.__shapemon.battle.ally.speciesId);
   await tap(page, "down"); await tap(page, "z");     // FIGHT -> PKMN, open party
+  await shot(page, "17-party-switch");
   await tap(page, "down"); await tap(page, "z");     // pick a different member, switch in
   await toMenu();
   const activeAfter = await page.evaluate(() => window.__shapemon.battle.ally.speciesId);
   ok("switch changed the active creature", activeAfter !== activeBefore);
   await winBattle(page);
+
+  // 11b) STATUS condition shown on the HP box (paralysis).
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); s.healParty(); s.startWildBattle(); s.battle.ally.status = "paralysis"; });
+  await toMenu();
+  await shot(page, "18-status");
+  ok("status set on active creature", await page.evaluate(() => window.__shapemon.battle.ally.status === "paralysis"));
+  await winBattle(page);
+
+  // 11c) EVOLUTION: an Emberling one XP short of Lv16 evolves on winning.
+  await page.evaluate(() => {
+    const s = window.__shapemon; s.setRng(() => 0.9);
+    const e = s.api.makeCreature("emberling", 15); e.exp = s.api.expForLevel(16) - 1;
+    s.player.party.unshift(e); s.startWildBattle(); s.battle.enemy.hp = 1;
+  });
+  await toMenu();
+  const evoShot = await winCapturing(page, "19-evolution", "evolv");
+  ok("captured an evolution", evoShot);
+  ok("Emberling evolved into Blazehound", await page.evaluate(() => window.__shapemon.player.party.some((c) => c.speciesId === "blazehound")));
 
   // 12) Gym 1: heal, travel, win -> Leaf Badge (+ prize money).
   await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.healParty(); });
