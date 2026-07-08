@@ -24,16 +24,19 @@ npm start           # serves http://localhost:8080  (ES modules need http, not f
 - **Move:** Arrows / WASD  ·  **Confirm:** Z / Enter  ·  **Back:** X / Esc
 - Title screen: **New Game** / **Continue** (save is automatic on every map change).
 
-## The journey (start → gym 1 → ending)
+## The journey (start → two gyms → ending)
 
 1. Wake in your room, step outside into **Willow Town**.
 2. Visit **Prof. Cedar's lab** for your starter — the Fire-type **Emberling**.
-3. Explore: **Heal Center**, **Rocky Cave**, villagers to talk to, and two
-   **trainer battles** (Camper Rick, Scout Mia) on the route.
-4. Tall grass triggers **random wild encounters** that level you up.
-5. Beat **Leader Fern** at **Fernwood Gym** (Grass — your fire has the edge) to
-   earn the **Leaf Badge**.
-6. The **Victory Gate** north of town opens → walk through it for the credits.
+3. Explore: **Heal Center**, **Mart** (buy items with prize money), **Rocky
+   Cave**, villagers, and **trainer battles** (Camper Rick, Scout Mia).
+4. Tall grass triggers **random wild encounters** — battle them, **catch** them
+   with a Snarebell (party of up to 6), and level up (creatures **evolve** and
+   **learn moves**).
+5. Beat **Leader Fern** at **Fernwood Gym** (Grass) to earn the **Leaf Badge**.
+6. The gate north opens → **Tidewater Town**: catch a Grass type, then beat
+   **Leader Marina's** Water gym for the **Tidewater Badge**.
+7. Step through the final gate for the credits.
 
 ## Architecture
 
@@ -82,9 +85,12 @@ pokemon/
 | Collision | Trees, walls, water, rocks, and NPCs block movement; verified by tests. |
 | Warps | Doors move between overworld and interiors (home, lab, heal center, gym, cave). |
 | Dialog | Centralized script text; talk to villagers, professor, nurse, trainers, gym leader. |
-| Battle | Authentic FireRed formulas + classic 2×2 command layout + animation (lunge, hit-flash, HP drain, faint). Wild / trainer / gym. Item use omitted. |
-| Save | Auto-save to `localStorage` on map change; New Game / Continue on the title. |
-| Badges | Sidebar panel tracks the Leaf Badge + lead-creature summary. |
+| Battle | Authentic FireRed formulas + classic 2×2 menu + animation. Wild / trainer / gym, multi-creature parties, **status conditions** (burn/poison/paralysis/sleep), **stat stages**, PP. |
+| Items / Shop | Bag with in-battle Potion/Full Heal/Revive/ball use; a **Mart** to buy items with prize money. |
+| Catch / Party | Catch wild creatures with a ball; carry up to 6, **switch** mid-battle, extras go to storage. |
+| Growth | EXP + level-up, **move learning**, and **evolution** (e.g. Emberling → Blazehound). |
+| Save | Auto-save to `localStorage` (party/box/bag/money/badges) on map change; New Game / Continue. |
+| World | Two towns (Willow + Tidewater), five+ interiors, badge-gated gates; sidebar tracks badges, money, party. |
 
 ## Testing
 

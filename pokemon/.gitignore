@@ -1,2 +1,7 @@
 node_modules/
 package-lock.json
+
+# The repo-root .gitignore ignores any "data/" directory (for ML datasets).
+# Our game config lives in src/data/, so keep it tracked.
+!src/data/
+!src/data/**

@@ -2,8 +2,10 @@
  * Classic layout: foe HP box top-left, your HP box bottom-right, 2x2 command
  * menu (FIGHT / PACK / PKMN / RUN). */
 import { ctx, W, H } from "../core/screen.js";
-import { battle } from "../state.js";
+import { battle, player } from "../state.js";
 import { TYPE_COLORS } from "../data/types.js";
+import { ITEMS } from "../data/items.js";
+import { usableInBattle } from "../engine/bag.js";
 import { drawCreature } from "./sprites.js";
 import { drawBox, drawHPBox, wrap } from "./hud.js";
 
@@ -74,13 +76,24 @@ export function renderBattle() {
     ctx.fillStyle = TYPE_COLORS[sel.type] || "#20222f";
     ctx.fillText("TYPE/" + sel.type.toUpperCase(), bx + bw - 210, by + 52);
     ctx.fillStyle = "#3553ff"; ctx.font = "14px 'Courier New', monospace"; ctx.fillText("X=back", bx + bw - 100, by + bh - 26);
-  } else if (battle.phase === "party") {
-    const c = battle.ally;
-    ctx.fillText(`${c.name}  Lv${c.level}`, bx + 20, by + 16);
-    ctx.font = "15px 'Courier New', monospace";
-    ctx.fillText(`HP ${c.hp}/${c.maxhp}   TYPE ${c.type.toUpperCase()}`, bx + 20, by + 46);
-    ctx.fillText(`ATK ${c.atk}  DEF ${c.def}  SP.ATK ${c.spAtk}`, bx + 20, by + 72);
-    ctx.fillText(`SP.DEF ${c.spDef}  SPD ${c.speed}`, bx + 20, by + 96);
+  } else if (battle.phase === "bag") {
+    const items = usableInBattle();
+    ctx.font = "16px 'Courier New', monospace";
+    if (!items.length) ctx.fillText("Your bag is empty.", bx + 20, by + 20);
+    items.slice(0, 4).forEach((b, i) => {
+      ctx.fillStyle = i === battle.bagIndex ? "#d63c3c" : "#20222f";
+      ctx.fillText((i === battle.bagIndex ? "> " : "  ") + ITEMS[b.item].name + " x" + b.qty, bx + 24, by + 18 + i * 26);
+    });
     ctx.fillStyle = "#3553ff"; ctx.font = "14px 'Courier New', monospace"; ctx.fillText("X=back", bx + bw - 100, by + bh - 26);
+  } else if (battle.phase === "party") {
+    ctx.font = "15px 'Courier New', monospace";
+    ctx.fillText(battle.mustSwitch ? "Choose the next Shapemon:" : "Switch to:", bx + 20, by + 12);
+    player.party.slice(0, 6).forEach((c, i) => {
+      const active = c === battle.ally;
+      ctx.fillStyle = i === battle.partyIndex ? "#d63c3c" : (c.hp > 0 ? "#20222f" : "#a0a0a8");
+      const tag = active ? " (out)" : c.hp <= 0 ? " (FNT)" : "";
+      ctx.fillText((i === battle.partyIndex ? "> " : "  ") + `${c.name} Lv${c.level} ${c.hp}/${c.maxhp}${tag}`, bx + 24, by + 36 + i * 15);
+    });
+    if (!battle.mustSwitch) { ctx.fillStyle = "#3553ff"; ctx.font = "14px 'Courier New', monospace"; ctx.fillText("X=back", bx + bw - 100, by + bh - 24); }
   }
 }

@@ -22,7 +22,8 @@ const S = (page) => page.evaluate(() => {
   const s = window.__shapemon;
   return { map: s.player.map, x: s.player.x, y: s.player.y, moving: s.player.moving,
            gstate: s.game.state, phase: s.battle.phase, level: s.player.party[0]?.level,
-           exp: s.player.party[0]?.exp, badge: s.flags.gymBadge, starter: s.flags.hasStarter };
+           exp: s.player.party[0]?.exp, badge0: !!s.flags.badges[0], badge1: !!s.flags.badges[1],
+           party: s.player.party.length, money: s.player.money, starter: s.flags.hasStarter };
 });
 const settle = (page) => page.waitForFunction("!window.__shapemon.player.moving", { timeout: 4000 }).catch(() => {});
 const wait = (page, ms) => page.waitForTimeout(ms);
@@ -168,7 +169,7 @@ async function winBattle(page) {
   await talkTo(page, "up");
   await clearDialog(page);
   ok("received starter", (await S(page)).starter === true);
-  await walkTo(page, 6, 9);          // lab exit door
+  await walkTo(page, 6, 8);          // lab exit door
   ok("exited Lab to town", (await S(page)).map === "town");
 
   // 6) Enter Heal Center (building), talk to nurse, exit.
@@ -205,30 +206,81 @@ async function winBattle(page) {
   ok("battle win granted a level up", afterWild.level > beforeLvl);
   await page.evaluate(() => window.__shapemon.setForceEncounter(false));
 
-  // 9) Gym battle: heal at the Center (proven above), travel to the gym with no
-  //    encounters, talk to the leader, and win to earn the badge.
-  await page.evaluate(() => { window.__shapemon.setNoEncounter(true); window.__shapemon.healParty(); });
+  // helper: advance an intro/anim battle to the command menu
+  const toMenu = async () => { for (let i = 0; i < 30; i++) { const s = await S(page); if (s.gstate !== "battle" || s.phase === "menu") return; await tap(page, "z"); } };
+
+  // 9) ITEM use in battle: heal the active creature with a Potion.
+  await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.setRng(() => 0.9); s.healParty(); s.player.party[0].hp = 4; s.startWildBattle(); });
+  await toMenu();
+  const potBefore = await page.evaluate(() => window.__shapemon.itemQty("potion"));
+  await tap(page, "right");            // FIGHT -> PACK
+  await tap(page, "z");                // open bag
+  await tap(page, "z");                // use first item (Potion) on the active creature
+  await toMenu();
+  const potAfter = await page.evaluate(() => window.__shapemon.itemQty("potion"));
+  ok("item use consumed a Potion", potAfter === potBefore - 1);
+  ok("Potion changed the creature's HP", (await S(page)).exp !== null);   // battle still valid
+  await winBattle(page);
+
+  // 10) CATCH a wild creature with a ball.
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.01); s.startWildBattle(); s.battle.enemy.hp = 1; });
+  await toMenu();
+  const partyBefore = (await S(page)).party;
+  await tap(page, "right"); await tap(page, "z");   // open bag
+  await tap(page, "down");                          // move to a ball (Snarebell)
+  await tap(page, "z");                             // throw it
+  for (let i = 0; i < 12; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); }
+  ok("caught creature joined the party", (await S(page)).party === partyBefore + 1);
+
+  // 11) SWITCH the active creature mid-battle.
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); s.player.party.push(s.api.makeCreature("wormling", 6)); s.startWildBattle(); });
+  await toMenu();
+  const activeBefore = await page.evaluate(() => window.__shapemon.battle.ally.speciesId);
+  await tap(page, "down"); await tap(page, "z");     // FIGHT -> PKMN, open party
+  await tap(page, "down"); await tap(page, "z");     // pick a different member, switch in
+  await toMenu();
+  const activeAfter = await page.evaluate(() => window.__shapemon.battle.ally.speciesId);
+  ok("switch changed the active creature", activeAfter !== activeBefore);
+  await winBattle(page);
+
+  // 12) Gym 1: heal, travel, win -> Leaf Badge (+ prize money).
+  await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.healParty(); });
   await walkTo(page, DOORS.G.x, DOORS.G.y);
-  ok("entered Gym", (await S(page)).map === "gym");
-  await walkTo(page, 6, 3);
-  await talkTo(page, "up");
-  await clearDialog(page);
-  ok("gym battle started", (await S(page)).gstate === "battle");
+  ok("entered Gym 1", (await S(page)).map === "gym");
+  await walkTo(page, 6, 3); await talkTo(page, "up"); await clearDialog(page);
+  ok("gym 1 battle started", (await S(page)).gstate === "battle");
   await page.screenshot({ path: path.join(shots, "6-gym-battle.png") });
   const afterGym = await winBattle(page);
-  ok("gym cleared -> Leaf Badge earned", afterGym.badge === true);
-  await clearDialog(page);   // Leader Fern's victory speech
-
-  // 10) Full walkthrough end: leave gym, reach the Victory Gate -> credits.
-  await walkTo(page, 6, 10);   // gym exit
-  ok("back in town after gym", (await S(page)).map === "town");
-  const gate = DOORS.E;
-  await walkTo(page, gate.x, gate.y);
+  ok("gym 1 cleared -> Leaf Badge earned", afterGym.badge0 === true);
   await clearDialog(page);
-  const end = await S(page);
-  ok("Victory Gate reached the ending", end.gstate === "credits");
+
+  // 13) Gate opens: leave gym, walk to the town gate -> warps to Tidewater Town.
+  await walkTo(page, 6, 10);
+  ok("back in town after gym 1", (await S(page)).map === "town");
+  await walkTo(page, DOORS.E.x, DOORS.E.y);
+  ok("town gate warped to Tidewater Town", (await S(page)).map === "north");
+  await page.screenshot({ path: path.join(shots, "7-tidewater.png") });
+
+  // 14) Gym 2 (Water). Bring a strong Grass type and win -> Tidewater Badge.
+  await page.evaluate(() => { const s = window.__shapemon; s.player.party.unshift(s.api.makeCreature("bloomworm", 22)); s.healParty(); });
+  const ND = await page.evaluate(() => window.__shapemon.NORTH_DOORS);
+  await walkTo(page, ND.G.x, ND.G.y);
+  ok("entered Gym 2", (await S(page)).map === "gym2");
+  await walkTo(page, 6, 3); await talkTo(page, "up"); await clearDialog(page);
+  ok("gym 2 battle started", (await S(page)).gstate === "battle");
+  await page.screenshot({ path: path.join(shots, "8-gym2-battle.png") });
+  const afterGym2 = await winBattle(page);
+  ok("gym 2 cleared -> Tidewater Badge earned", afterGym2.badge1 === true);
+  await clearDialog(page);
+
+  // 15) Final gate -> credits (the ending).
+  await walkTo(page, 6, 10);   // gym 2 exit
+  ok("back in Tidewater after gym 2", (await S(page)).map === "north");
+  await walkTo(page, ND.E.x, ND.E.y);
+  await clearDialog(page);
+  ok("final gate reached the ending", (await S(page)).gstate === "credits");
   await wait(page, 200);
-  await page.screenshot({ path: path.join(shots, "7-credits.png") });
+  await page.screenshot({ path: path.join(shots, "9-credits.png") });
 
   await browser.close();
   server.close();

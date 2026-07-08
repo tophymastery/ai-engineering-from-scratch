@@ -1,10 +1,11 @@
 /* Keyboard input: held directions for walking + discrete presses routed by
  * game state (title menu, dialog, overworld, battle). */
-import { STATE, game } from "./state.js";
+import { STATE, game, shop } from "./state.js";
 import { advanceDialog } from "./engine/dialog.js";
 import { interact, tryMove } from "./engine/world.js";
 import { battleInput } from "./engine/battle.js";
-import { newGame, continueGame } from "./engine/save.js";
+import { newGame, continueGame, saveGame } from "./engine/save.js";
+import { buyItem } from "./engine/shop.js";
 import { titleOptions } from "./render/scenes.js";
 
 export const keys = new Set();
@@ -26,8 +27,17 @@ export function onPress(a) {
       else if (DIRS.has(a)) tryMove(a);   // single-step on tap (held keys also walk via the loop)
       break;
     case STATE.BATTLE: battleInput(a); break;
+    case STATE.SHOP: shopInput(a); break;
     case STATE.CREDITS: break;
   }
+}
+
+function shopInput(a) {
+  const n = shop.stock.length;
+  if (a === "up") shop.index = (shop.index - 1 + n) % n;
+  if (a === "down") shop.index = (shop.index + 1) % n;
+  if (a === "action") buyItem(shop.stock[shop.index]);
+  if (a === "cancel") { saveGame(); game.state = STATE.WORLD; }
 }
 
 function titleInput(a) {

@@ -1,11 +1,13 @@
 /* Overworld: grid movement, collision, warps, encounters, NPC interaction. */
 import { CONFIG } from "../data/config.js";
-import { MAPS, WARPS, npcAt, isBlocked, tileAt, isEncounterTile } from "../data/maps.js";
+import { MAPS, WARPS, GATES, npcAt, isBlocked, tileAt, isEncounterTile } from "../data/maps.js";
 import { ENCOUNTERS } from "../data/encounters.js";
 import { STORY } from "../data/story.js";
-import { STATE, DIRV, player, game, flags } from "../state.js";
+import { STATE, DIRV, player, game, flags, shop } from "../state.js";
+import { SHOP_STOCK } from "../data/items.js";
 import { rand } from "../core/rng.js";
 import { say } from "./dialog.js";
+import { healParty } from "./party.js";
 import { makeCreature, makeParty } from "./creature.js";
 import { startWildBattle, startTrainerBattle, startGymBattle } from "./battle.js";
 import { saveGame } from "./save.js";
@@ -45,10 +47,15 @@ export function finishMove() {
 
   const ch = tileAt(MAPS[player.map], player.x, player.y);
 
-  // Victory Gate: the ending. Opens once the Leaf Badge is earned.
+  // Badge-gated gate: warp onward (or roll credits) if the badge is earned.
   if (ch === "E") {
-    if (flags.gymBadge) { game.state = STATE.CREDITS; }
-    else say(STORY.gateLocked);
+    const gate = GATES[player.map];
+    if (gate && flags.badges[gate.need]) {
+      if (gate.credits) game.state = STATE.CREDITS;
+      else doWarp(gate.warp);
+    } else {
+      say(STORY[`gateLocked${gate ? gate.need : 0}`] || STORY.gateLocked0);
+    }
     return;
   }
 
@@ -82,10 +89,13 @@ export function interact() {
       else say(STORY.profDone);
       break;
     case "nurse":
-      say(STORY.nurse, () => { for (const c of player.party) { c.hp = c.maxhp; c.moves.forEach((m) => (m.pp = m.maxpp)); } });
+      say(STORY.nurse, () => { healParty(); if (flags.hasStarter) saveGame(); });
       break;
     case "villager":
       say(STORY.npc[npc.dialog] || ["..."]);
+      break;
+    case "shop":
+      say(STORY.shopWelcome, () => { shop.stock = SHOP_STOCK.slice(); shop.index = 0; game.state = STATE.SHOP; });
       break;
     case "trainer":
       if (npc.defeated) { say([`${npc.name}: Great battle earlier!`]); break; }
@@ -96,10 +106,13 @@ export function interact() {
           say(STORY.trainers[npc.dialog].win);
         }));
       break;
-    case "gym":
-      if (!flags.hasStarter) say(STORY.gymNoStarter);
-      else if (!flags.gymBadge) say(STORY.gymIntro, () => startGymBattle());
-      else say(STORY.gymDone);
+    case "gym": {
+      const b = npc.badge;
+      if (!flags.hasStarter) say(STORY[npc.badge === 0 ? "gymNoStarter" : "gym2NoStarter"]);
+      else if (!flags.badges[b]) say(STORY[npc.intro], () =>
+        startGymBattle(npc.name, makeParty(npc.party), b, () => { flags.badges[b] = true; game.state = STATE.WORLD; }));
+      else say(STORY[npc.done]);
       break;
+    }
   }
 }
