@@ -1,0 +1,16 @@
+{
+  "name": "shapemon-ember-quest",
+  "version": "1.0.0",
+  "description": "An original Gen-1/3-style creature RPG (HTML5 Canvas), fully data-driven.",
+  "type": "module",
+  "scripts": {
+    "start": "node serve.mjs 8080",
+    "test": "node tests/logic.test.mjs && node tests/ui.test.mjs",
+    "test:logic": "node tests/logic.test.mjs",
+    "test:ui": "node tests/ui.test.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}
