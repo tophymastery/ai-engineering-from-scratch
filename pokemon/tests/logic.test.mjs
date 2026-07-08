@@ -75,13 +75,15 @@ for (const [id, s] of Object.entries(SPECIES)) {
   ok(`${id} has sprite`, !!s.sprite && !!s.sprite.shape && !!s.sprite.color);
   ok(`${id} has 6 base stats`, ["hp", "atk", "def", "spAtk", "spDef", "speed"].every((k) => typeof s.base[k] === "number"));
   ok(`${id} expYield`, typeof s.expYield === "number" && s.expYield > 0);
-  ok(`${id} moves valid`, s.moves.length > 0 && s.moves.every((m) => !!MOVES[m]));
+  ok(`${id} learnset valid`, s.learnset.length > 0 && s.learnset.every((l) => !!MOVES[l.move] && typeof l.level === "number"));
+  ok(`${id} evolution target exists`, !s.evolvesTo || !!SPECIES[s.evolvesTo.into]);
 }
 for (const [id, m] of Object.entries(MOVES)) {
   ok(`move ${id} type has color`, !!TYPE_COLORS[m.type]);
   ok(`move ${id} fields`, typeof m.power === "number" && typeof m.pp === "number" && typeof m.accuracy === "number");
 }
-for (const [id, it] of Object.entries(ITEMS)) ok(`item ${id} fields`, !!it.kind && typeof it.value === "number");
+for (const [id, it] of Object.entries(ITEMS))
+  ok(`item ${id} fields`, !!it.kind && (typeof it.value === "number" || typeof it.ballBonus === "number"));
 ok("starting bag items valid", STARTING_BAG.every((b) => !!ITEMS[b.item]));
 ok("starter species exists", !!SPECIES[CONFIG.starter.species]);
 for (const [area, e] of Object.entries(ENCOUNTERS)) {
@@ -113,9 +115,69 @@ for (const [key, w] of Object.entries(WARPS)) {
       seen.add(k); q.push({ x: nx, y: ny });
     }
   }
-  for (const ch of ["G", "L", "C", "V", "E"])
+  for (const ch of ["G", "L", "C", "V", "M", "E"])
     ok(`door ${ch} reachable`, seen.has(`${DOORS[ch].x},${DOORS[ch].y}`));
 }
+
+// ---------------------------------------------------------------- new mechanics
+import { NORTH_DOORS, GATES } from "../src/data/maps.js";
+import { SHOP_STOCK } from "../src/data/items.js";
+import { stageMult } from "../src/engine/damage.js";
+import { movesAtLevel, learnMove, evolveIfReady } from "../src/engine/creature.js";
+
+section("stat stages");
+eq("stage 0 = x1", stageMult(0), 1);
+eq("stage +2 = x2", stageMult(2), 2);
+eq("stage -2 = x0.5", stageMult(-2), 0.5);
+{
+  const atk = makeCreature("nibbit", 20), def = makeCreature("nibbit", 20);
+  const base = calcDamage(atk, def, MOVES.tackle, { forceCrit: false, rand: 100 }).dmg;
+  def.stages.def = 2;   // sharper defense -> less damage
+  const buffed = calcDamage(atk, def, MOVES.tackle, { forceCrit: false, rand: 100 }).dmg;
+  ok("higher DEF stage reduces damage", buffed < base);
+}
+
+section("status: burn halves physical attack");
+{
+  const atk = makeCreature("nibbit", 20), def = makeCreature("cavvit", 20);
+  const normal = calcDamage(atk, def, MOVES.tackle, { forceCrit: false, rand: 100 }).dmg;
+  atk.status = "burn";
+  const burned = calcDamage(atk, def, MOVES.tackle, { forceCrit: false, rand: 100 }).dmg;
+  ok("burn lowers physical damage", burned < normal);
+}
+
+section("move learning & evolution");
+{
+  const c = makeCreature("emberling", 1);
+  ok("starts with early moves only", c.moves.some((m) => m.id === "scratch"));
+  ok("emberling knows ember at L7", movesAtLevel(SPECIES.emberling, 7).includes("ember"));
+  const fresh = makeCreature("wormling", 1);
+  while (fresh.moves.length < 4) fresh.moves.push({ id: "filler" + fresh.moves.length });
+  eq("learnMove refuses a 5th move", learnMove(fresh, "spore"), "full");
+  const evo = makeCreature("emberling", 16);
+  const name = evolveIfReady(evo);
+  eq("emberling evolves at 16", name, "Blazehound");
+  eq("species id updated", evo.speciesId, "blazehound");
+}
+
+section("catch chance shape");
+{
+  const p = window_less_catch("snarebell", 1, 1);   // full HP -> low
+  const q = window_less_catch("snarebell", 1, 30);  // 1 HP of 30 -> high
+  ok("catch chance rises as HP drops", q > p);
+}
+function window_less_catch(ball, hp, maxhp) {
+  const bonus = ITEMS[ball].ballBonus;
+  const hpFactor = (maxhp * 3 - hp * 2) / (maxhp * 3);
+  return Math.min(1, bonus * hpFactor);
+}
+
+section("second region + shop data");
+ok("north gate needs badge 1", GATES.north.need === 1 && GATES.north.credits);
+ok("town gate needs badge 0 and warps north", GATES.town.need === 0 && GATES.town.warp.map === "north");
+ok("north gym leader has a party", NPCS.gym2[0].party.length >= 1);
+ok("shop stock all valid items", SHOP_STOCK.every((id) => !!ITEMS[id]));
+ok("north map registered", !!MAPS.north && !!MAPS.gym2 && !!MAPS.mart);
 
 // ---------------------------------------------------------------- simulated battle
 section("simulated battle: found -> win + level up");

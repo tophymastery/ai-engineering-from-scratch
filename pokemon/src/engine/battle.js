@@ -1,17 +1,21 @@
 /* Battle engine — authentic FireRed sequence & layout, with animation.
- * Supports wild, trainer, and gym battles (multi-creature enemy parties).
- * The item system is intentionally omitted (PACK reports no items). */
+ * Supports wild / trainer / gym battles, multi-creature parties, items, catching,
+ * switching, status conditions, stat stages, move-learning, and evolution. */
 import { CONFIG } from "../data/config.js";
-import { STATE, game, player, flags, battle } from "../state.js";
+import { STATE, game, player, battle, flags } from "../state.js";
+import { SPECIES } from "../data/species.js";
+import { ITEMS } from "../data/items.js";
+import { ENCOUNTERS } from "../data/encounters.js";
 import { calcDamage } from "./damage.js";
 import { gainExp, expYield } from "./stats.js";
-import { makeCreature, makeMove } from "./creature.js";
-import { ENCOUNTERS } from "../data/encounters.js";
-import { healParty } from "./party.js";
+import { makeCreature, makeMove, resetStages, learnableAt, learnMove, evolveIfReady } from "./creature.js";
+import { healParty, firstHealthy, partyWiped } from "./party.js";
+import { removeItem, addItem, applyItem, usableInBattle } from "./bag.js";
 import { doWarp } from "./world.js";
 import { rint, rand, rrange } from "../core/rng.js";
 
-const A = CONFIG.animation;
+const A = CONFIG.animation, B = CONFIG.battle;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 function initAnim() {
   const ally = battle.ally, enemy = battle.enemy;
@@ -21,7 +25,6 @@ function initAnim() {
     lastMsg: -1,
   };
 }
-
 function battleSay(lines, after, fx) {
   battle.msg = Array.isArray(lines) ? lines : [lines];
   battle.fx = fx || [];
@@ -31,14 +34,15 @@ function battleSay(lines, after, fx) {
 
 function enterBattle(kind, enemyParty, opts = {}) {
   battle.kind = kind;
-  battle.enemyParty = enemyParty;
-  battle.enemyIdx = 0;
-  battle.enemy = enemyParty[0];
-  battle.ally = player.party.find((c) => c.hp > 0) || player.party[0];
+  battle.enemyParty = enemyParty; battle.enemyIdx = 0; battle.enemy = enemyParty[0];
+  battle.ally = firstHealthy() || player.party[0];
   battle.onWin = opts.onWin || null;
+  battle.prize = opts.prize || 0;
   battle.canRun = kind === "wild";
   battle.foeName = opts.foeName || null;
-  battle.phase = "intro"; battle.cmd = 0; battle.moveIndex = 0;
+  battle.mustSwitch = false;
+  battle.phase = "intro"; battle.cmd = 0; battle.moveIndex = 0; battle.bagIndex = 0; battle.partyIndex = 0;
+  resetStages(battle.ally); resetStages(battle.enemy);
   game.state = STATE.BATTLE;
   initAnim();
 }
@@ -50,46 +54,39 @@ function weightedPick(table) {
   for (const e of table) { r -= (e.weight || 1); if (r <= 0) return e; }
   return table[table.length - 1];
 }
-
 export function startWildBattle(area) {
   const pick = weightedPick(area.table);
   const enemy = makeCreature(pick.species, rrange(pick.min, pick.max));
   enterBattle("wild", [enemy]);
-  battleSay([`Wild ${enemy.name} appeared!`, `Go! ${battle.ally.name}!`],
-    () => { battle.phase = "menu"; });
+  battleSay([`Wild ${enemy.name} appeared!`, `Go! ${battle.ally.name}!`], () => { battle.phase = "menu"; });
 }
-
 export function startTrainerBattle(enemyParty, name, onWin) {
-  enterBattle("trainer", enemyParty, { onWin, foeName: name });
-  battleSay([`${name} wants to battle!`, `${name} sent out ${battle.enemy.name}!`, `Go! ${battle.ally.name}!`],
-    () => { battle.phase = "menu"; });
+  const prize = CONFIG.economy.trainerPrizePerLevel * enemyParty[enemyParty.length - 1].level;
+  enterBattle("trainer", enemyParty, { onWin, foeName: name, prize });
+  battleSay([`${name} wants to battle!`, `${name} sent out ${battle.enemy.name}!`, `Go! ${battle.ally.name}!`], () => { battle.phase = "menu"; });
 }
-
-export function startGymBattle() {
-  const enemy = makeCreature("thornbud", 6);
-  enterBattle("gym", [enemy], { foeName: "Leader Fern", onWin: () => { flags.gymBadge = true; game.state = STATE.WORLD; } });
-  battleSay([`Leader Fern sent out ${enemy.name}!`, `Go! ${battle.ally.name}!`],
-    () => { battle.phase = "menu"; });
+export function startGymBattle(leaderName, party, badgeIndex, onWin) {
+  enterBattle("gym", party, { foeName: leaderName, prize: CONFIG.economy.gymPrize, onWin });
+  battleSay([`${leaderName} sent out ${battle.enemy.name}!`, `Go! ${battle.ally.name}!`], () => { battle.phase = "menu"; });
 }
 
 // ---- Input -----------------------------------------------------------------
 export function battleInput(a) {
-  if (battle.phase === "anim") {
+  const ph = battle.phase;
+  if (ph === "anim") {
     if (a === "action" || a === "cancel") {
       battle.msgIndex++;
-      if (battle.msgIndex >= battle.msg.length) {
-        const cb = battle.afterMsg; battle.afterMsg = null; if (cb) cb();
-      }
+      if (battle.msgIndex >= battle.msg.length) { const cb = battle.afterMsg; battle.afterMsg = null; if (cb) cb(); }
     }
     return;
   }
-  if (battle.phase === "menu") {
+  if (ph === "menu") {
     if (a === "left" || a === "right") battle.cmd ^= 1;
     if (a === "up" || a === "down") battle.cmd ^= 2;
     if (a === "action") chooseCommand(battle.cmd);
     return;
   }
-  if (battle.phase === "moves") {
+  if (ph === "moves") {
     const n = battle.ally.moves.length;
     if (a === "down") battle.moveIndex = (battle.moveIndex + 1) % n;
     if (a === "up") battle.moveIndex = (battle.moveIndex - 1 + n) % n;
@@ -97,24 +94,67 @@ export function battleInput(a) {
     if (a === "action") {
       const mv = battle.ally.moves[battle.moveIndex];
       if (mv.pp <= 0) { battleSay(["No PP left for this move!"], () => { battle.phase = "moves"; }); return; }
-      doTurn(mv);
+      useMove(mv);
     }
     return;
   }
-  if (battle.phase === "party") { if (a === "cancel" || a === "action") battle.phase = "menu"; }
+  if (ph === "bag") {
+    const items = usableInBattle();
+    if (!items.length) { battle.phase = "menu"; return; }
+    if (a === "down") battle.bagIndex = (battle.bagIndex + 1) % items.length;
+    if (a === "up") battle.bagIndex = (battle.bagIndex - 1 + items.length) % items.length;
+    if (a === "cancel") { battle.phase = "menu"; return; }
+    if (a === "action") useItem(items[Math.min(battle.bagIndex, items.length - 1)].item);
+    return;
+  }
+  if (ph === "party") {
+    const n = player.party.length;
+    if (a === "down") battle.partyIndex = (battle.partyIndex + 1) % n;
+    if (a === "up") battle.partyIndex = (battle.partyIndex - 1 + n) % n;
+    if (a === "cancel" && !battle.mustSwitch) { battle.phase = "menu"; return; }
+    if (a === "action") {
+      const idx = battle.partyIndex, cand = player.party[idx];
+      if (cand === battle.ally || cand.hp <= 0) return;   // invalid pick
+      switchTo(idx, battle.mustSwitch);
+    }
+    return;
+  }
 }
 
 function chooseCommand(cmd) {
   if (cmd === 0) { battle.phase = "moves"; battle.moveIndex = 0; }
-  else if (cmd === 1) battleSay(["You have no items!"], () => { battle.phase = "menu"; });
-  else if (cmd === 2) battle.phase = "party";
+  else if (cmd === 1) { battle.phase = "bag"; battle.bagIndex = 0; }
+  else if (cmd === 2) { battle.phase = "party"; battle.partyIndex = player.party.indexOf(battle.ally); }
   else if (cmd === 3) tryRun();
 }
-
 function tryRun() {
   if (!battle.canRun) { battleSay(["No! There's no running from this battle!"], () => { battle.phase = "menu"; }); return; }
   battleSay(["Got away safely!"], () => { game.state = STATE.WORLD; });
 }
+
+// ---- Status helpers --------------------------------------------------------
+function effectiveSpeed(cr) {
+  const base = cr.speed * (cr.stages ? (cr.stages.speed >= 0 ? (2 + cr.stages.speed) / 2 : 2 / (2 - cr.stages.speed)) : 1);
+  return cr.status === "paralysis" ? base * B.paralysisSpeed : base;
+}
+function applyStatus(target, status, q, fx) {
+  if (target.status !== "none") return false;
+  target.status = status;
+  if (status === "sleep") target.sleepTurns = rrange(B.sleepMin, B.sleepMax);
+  const word = { burn: "was burned", poison: "was poisoned", paralysis: "is paralyzed", sleep: "fell asleep" }[status];
+  q.push(`${side(target)}${target.name} ${word}!`); fx.push(null);
+  return true;
+}
+function changeStage(cr, stat, delta, q, fx) {
+  const old = cr.stages[stat];
+  cr.stages[stat] = clamp(old + delta, -6, 6);
+  if (cr.stages[stat] === old) { q.push(`${side(cr)}${cr.name}'s ${stat.toUpperCase()} won't go higher!`); fx.push(null); return; }
+  const dir = delta > 0 ? "rose" : "fell";
+  const sharp = Math.abs(delta) >= 2 ? " sharply" : "";
+  q.push(`${side(cr)}${cr.name}'s ${stat.toUpperCase()}${sharp} ${dir}!`); fx.push(null);
+}
+const side = (cr) => (cr === battle.enemy ? "Foe " : "");
+const hpFx = (cr) => ({ hp: { who: cr === battle.enemy ? "enemy" : "ally", val: cr.hp } });
 
 function pickEnemyMove(enemy) {
   const usable = enemy.moves.filter((m) => m.pp > 0);
@@ -122,72 +162,180 @@ function pickEnemyMove(enemy) {
   return pool[rint(pool.length)];
 }
 
-// ---- Turn resolution -------------------------------------------------------
-export function doTurn(playerMove) {
-  const ally = battle.ally, enemy = battle.enemy;
-  const enemyMove = pickEnemyMove(enemy);
-  const allyFirst = ally.speed === enemy.speed ? rand() < 0.5 : ally.speed > enemy.speed;
+// One attacker's action within a turn; pushes messages + fx into q/fx.
+function strike(att, def, move, q, fx) {
+  if (att.hp <= 0 || def.hp <= 0) return;
+  // sleep / paralysis gating
+  if (att.status === "sleep") {
+    if (att.sleepTurns > 0) att.sleepTurns--;
+    if (att.sleepTurns <= 0 && att.status === "sleep") { att.status = "none"; q.push(`${side(att)}${att.name} woke up!`); fx.push(null); }
+    else { q.push(`${side(att)}${att.name} is fast asleep.`); fx.push(null); return; }
+  }
+  if (att.status === "paralysis" && rand() < B.paralysisSkipChance) {
+    q.push(`${side(att)}${att.name} is paralyzed! It can't move!`); fx.push(null); return;
+  }
+  if (move.pp != null) move.pp = Math.max(0, move.pp - 1);
 
-  const lines = [], fx = [];
-  const strike = (att, def, move, foeSide) => {
-    if (att.hp <= 0 || def.hp <= 0) return;
-    if (move.pp != null) move.pp = Math.max(0, move.pp - 1);
+  // accuracy
+  if (rand() * 100 >= move.accuracy) { q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: att === battle.enemy ? "enemy" : "ally" }); q.push("But it missed!"); fx.push(null); return; }
+
+  if (move.power > 0) {
     const res = calcDamage(att, def, move);
     def.hp = Math.max(0, def.hp - res.dmg);
-    lines.push(`${foeSide ? "Foe " : ""}${att.name} used ${move.name}!`);
-    fx.push({ act: foeSide ? "enemy" : "ally", hit: def === enemy ? "enemy" : "ally",
-              hp: { who: def === enemy ? "enemy" : "ally", val: def.hp } });
-    if (res.crit) { lines.push("A critical hit!"); fx.push(null); }
-    if (res.eff >= 2) { lines.push("It's super effective!"); fx.push(null); }
-    else if (res.eff <= 0.5) { lines.push("It's not very effective..."); fx.push(null); }
-    if (def.hp <= 0) { lines.push(`${def === enemy ? "Foe " : ""}${def.name} fainted!`); fx.push({ faint: def === enemy ? "enemy" : "ally" }); }
-  };
-
-  const order = allyFirst
-    ? [[ally, enemy, playerMove, false], [enemy, ally, enemyMove, true]]
-    : [[enemy, ally, enemyMove, true], [ally, enemy, playerMove, false]];
-  for (const [att, def, move, foeSide] of order) { if (def.hp <= 0) break; strike(att, def, move, foeSide); }
-
-  battleSay(lines, resolveTurn, fx);
+    q.push(`${side(att)}${att.name} used ${move.name}!`);
+    fx.push({ act: att === battle.enemy ? "enemy" : "ally", hit: def === battle.enemy ? "enemy" : "ally", ...hpFx(def) });
+    if (res.crit) { q.push("A critical hit!"); fx.push(null); }
+    if (res.eff >= 2) { q.push("It's super effective!"); fx.push(null); }
+    else if (res.eff <= 0.5) { q.push("It's not very effective..."); fx.push(null); }
+    if (def.hp <= 0) { q.push(`${side(def)}${def.name} fainted!`); fx.push({ faint: def === battle.enemy ? "enemy" : "ally" }); return; }
+    if (move.effect && move.effect.status && rand() < (move.effect.chance ?? 1)) applyStatus(def, move.effect.status, q, fx);
+  } else if (move.effect) {
+    q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: att === battle.enemy ? "enemy" : "ally" });
+    if (move.effect.stat) {
+      const target = move.effect.target === "self" ? att : def;
+      changeStage(target, move.effect.stat, move.effect.stages, q, fx);
+    } else if (move.effect.status) {
+      if (!applyStatus(def, move.effect.status, q, fx)) { q.push("But it failed!"); fx.push(null); }
+    }
+  }
 }
 
+function endOfTurnStatus(cr, q, fx) {
+  if (cr.hp <= 0) return;
+  if (cr.status === "burn" || cr.status === "poison") {
+    const dmg = Math.max(1, Math.floor(cr.maxhp * (cr.status === "burn" ? B.burnDamage : B.poisonDamage)));
+    cr.hp = Math.max(0, cr.hp - dmg);
+    q.push(`${side(cr)}${cr.name} is hurt by its ${cr.status}!`); fx.push(hpFx(cr));
+    if (cr.hp <= 0) { q.push(`${side(cr)}${cr.name} fainted!`); fx.push({ faint: cr === battle.enemy ? "enemy" : "ally" }); }
+  }
+}
+
+// ---- Player actions --------------------------------------------------------
+function useMove(playerMove) {
+  const ally = battle.ally, enemy = battle.enemy;
+  const enemyMove = pickEnemyMove(enemy);
+  const q = [], fx = [];
+  const allyFirst = effectiveSpeed(ally) === effectiveSpeed(enemy) ? rand() < 0.5 : effectiveSpeed(ally) > effectiveSpeed(enemy);
+  const order = allyFirst ? [[ally, enemy, playerMove], [enemy, ally, enemyMove]] : [[enemy, ally, enemyMove], [ally, enemy, playerMove]];
+  for (const [att, def, mv] of order) { if (att.hp > 0 && def.hp > 0) strike(att, def, mv, q, fx); }
+  if (enemy.hp > 0 && ally.hp > 0) { endOfTurnStatus(ally, q, fx); endOfTurnStatus(enemy, q, fx); }
+  battleSay(q, resolveTurn, fx);
+}
+
+function useItem(id) {
+  const it = ITEMS[id];
+  if (it.kind === "ball") { attemptCatch(id); return; }
+  const target = it.kind === "revive" ? player.party.find((c) => c.hp <= 0) : battle.ally;
+  const msg = target ? applyItem(id, target) : null;
+  if (!msg) { battleSay(["It won't have any effect."], () => { battle.phase = "bag"; }); return; }
+  removeItem(id);
+  const q = [`You used ${it.name}.`, msg], fx = [null, target === battle.ally ? hpFx(battle.ally) : null];
+  const enemyMove = pickEnemyMove(battle.enemy);
+  if (battle.ally.hp > 0) strike(battle.enemy, battle.ally, enemyMove, q, fx);
+  if (battle.enemy.hp > 0 && battle.ally.hp > 0) endOfTurnStatus(battle.ally, q, fx);
+  battleSay(q, resolveTurn, fx);
+}
+
+function switchTo(idx, forced) {
+  resetStages(battle.ally);
+  battle.ally = player.party[idx];
+  resetStages(battle.ally);
+  battle.anim.hpAlly = battle.anim.tgtAlly = battle.ally.hp;
+  const q = [`Go! ${battle.ally.name}!`], fx = [null];
+  if (!forced) {   // a voluntary switch spends the turn; the foe attacks
+    const enemyMove = pickEnemyMove(battle.enemy);
+    if (battle.ally.hp > 0) strike(battle.enemy, battle.ally, enemyMove, q, fx);
+    if (battle.enemy.hp > 0 && battle.ally.hp > 0) endOfTurnStatus(battle.ally, q, fx);
+  }
+  battle.mustSwitch = false;
+  battleSay(q, resolveTurn, fx);
+}
+
+function catchChance(enemy, ball) {
+  const bonus = ITEMS[ball].ballBonus;
+  const hpFactor = (enemy.maxhp * 3 - enemy.hp * 2) / (enemy.maxhp * 3);
+  const statusBonus = CONFIG.catch.statusBonus[enemy.status] ?? 1;
+  return clamp(bonus * hpFactor * statusBonus, 0, 1);
+}
+function attemptCatch(ball) {
+  removeItem(ball);
+  const enemy = battle.enemy;
+  const caught = rand() < catchChance(enemy, ball);
+  if (!caught) {
+    const q = [`You threw a ${ITEMS[ball].name}!`, "Oh no! It broke free!"], fx = [null, null];
+    const enemyMove = pickEnemyMove(enemy);
+    if (battle.ally.hp > 0) strike(enemy, battle.ally, enemyMove, q, fx);
+    if (battle.ally.hp > 0) endOfTurnStatus(battle.ally, q, fx);
+    battleSay(q, resolveTurn, fx);
+    return;
+  }
+  enemy.status = "none"; resetStages(enemy);
+  const toParty = player.party.length < CONFIG.party.max;
+  if (toParty) player.party.push(enemy); else player.box.push(enemy);
+  battleSay([`You threw a ${ITEMS[ball].name}!`, `Gotcha! ${enemy.name} was caught!`,
+    toParty ? `${enemy.name} joined your party!` : `${enemy.name} was sent to storage.`],
+    () => { game.state = STATE.WORLD; });
+}
+
+// ---- Turn resolution -------------------------------------------------------
 function resolveTurn() {
   const ally = battle.ally, enemy = battle.enemy;
+
   if (enemy.hp <= 0) {
     const gain = expYield(enemy);
+    const levelsBefore = ally.level;
     const levels = gainExp(ally, gain);
-    const lines = [`${ally.name} gained ${gain} EXP. Points!`];
-    for (const lv of levels) lines.push(`${ally.name} grew to level ${lv}!`);
+    const lines = [`${ally.name} gained ${gain} EXP. Points!`], after = [];
+    for (const lv of levels) {
+      lines.push(`${ally.name} grew to level ${lv}!`);
+      for (const mv of learnableAt(ally, lv)) {
+        if (learnMove(ally, mv) === "learned") lines.push(`${ally.name} learned ${mv.replace(/^\w/, (c) => c)}!`);
+      }
+    }
+    if (levels.length) { const evolved = evolveIfReady(ally); if (evolved) { lines.push(`What? ${ally.name} is evolving!`); lines.push(`${ally.name} evolved into ${evolved}!`); } }
 
     const hasNext = battle.enemyIdx + 1 < battle.enemyParty.length;
     battleSay(lines, () => {
       if (hasNext) {
-        battle.enemyIdx++;
-        battle.enemy = battle.enemyParty[battle.enemyIdx];
-        battle.anim.hpEnemy = battle.anim.tgtEnemy = battle.enemy.hp;
-        battle.anim.faint = { who: null, t: 0 };
+        battle.enemyIdx++; battle.enemy = battle.enemyParty[battle.enemyIdx]; resetStages(battle.enemy);
+        battle.anim.hpEnemy = battle.anim.tgtEnemy = battle.enemy.hp; battle.anim.faint = { who: null, t: 0 };
         battleSay([`${battle.foeName} sent out ${battle.enemy.name}!`], () => { battle.phase = "menu"; });
-      } else if (battle.onWin) battle.onWin();
-      else game.state = STATE.WORLD;
+      } else {
+        finishWin();
+      }
     });
     return;
   }
+
   if (ally.hp <= 0) {
-    battleSay([`${ally.name} fainted!`, "You have no Shapemon left!", "... You scurried back home."],
-      () => { healParty(); doWarp({ map: "home", x: 5, y: 3, dir: "down" }); game.state = STATE.WORLD; });
+    if (!partyWiped()) {
+      battle.mustSwitch = true;
+      battleSay([`${ally.name} fainted!`], () => { battle.phase = "party"; battle.partyIndex = player.party.findIndex((c) => c.hp > 0); });
+    } else {
+      battleSay([`${ally.name} fainted!`, "You have no Shapemon left!", "... You scurried back home."],
+        () => { healParty(); doWarp({ map: "home", x: 5, y: 3, dir: "down" }); game.state = STATE.WORLD; });
+    }
     return;
   }
   battle.phase = "menu"; battle.cmd = 0;
 }
 
-// ---- Animation stepper (called every frame while in battle) ----------------
+function finishWin() {
+  if (battle.prize > 0) {
+    player.money += battle.prize;
+    battleSay([`You won ${battle.prize} coins!`], () => { if (battle.onWin) battle.onWin(); else game.state = STATE.WORLD; });
+  } else if (battle.onWin) battle.onWin();
+  else game.state = STATE.WORLD;
+}
+
+// ---- Animation stepper -----------------------------------------------------
 export function updateBattleAnim() {
   const a = battle.anim; if (!a) return;
   if (a.lastMsg !== battle.msgIndex) {
     a.lastMsg = battle.msgIndex;
     const fx = battle.fx[battle.msgIndex];
     if (fx) {
-      if (fx.act) { a.lunge = { who: fx.act, t: A.lungeFrames }; a.flash = { who: fx.hit, t: A.flashFrames }; }
+      if (fx.act) { a.lunge = { who: fx.act, t: A.lungeFrames }; if (fx.hit) a.flash = { who: fx.hit, t: A.flashFrames }; }
       if (fx.hp) { if (fx.hp.who === "ally") a.tgtAlly = fx.hp.val; else a.tgtEnemy = fx.hp.val; }
       if (fx.faint) a.faint = { who: fx.faint, t: A.faintFrames };
     }

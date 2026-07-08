@@ -3,22 +3,25 @@
 import { ctx } from "./core/screen.js";
 import { setRng } from "./core/rng.js";
 import { CONFIG } from "./data/config.js";
-import { STATE, game, player, flags, battle } from "./state.js";
-import { MAPS, WARPS, NPCS, DOORS, isBlocked, tileAt, isEncounterTile } from "./data/maps.js";
+import { STATE, game, player, flags, battle, shop } from "./state.js";
+import { MAPS, WARPS, NPCS, DOORS, NORTH_DOORS, GATES, isBlocked, tileAt, isEncounterTile } from "./data/maps.js";
 import { SPECIES } from "./data/species.js";
 import { MOVES } from "./data/moves.js";
-import { ITEMS } from "./data/items.js";
+import { ITEMS, SHOP_STOCK } from "./data/items.js";
 import { ENCOUNTERS } from "./data/encounters.js";
 import { typeEffectiveness } from "./data/types.js";
 import { calcStat, expForLevel, levelForExp, gainExp, expYield } from "./engine/stats.js";
 import { calcDamage } from "./engine/damage.js";
 import { makeCreature, makeMove, makeParty } from "./engine/creature.js";
+import { addItem, itemQty, usableInBattle } from "./engine/bag.js";
+import { buyItem } from "./engine/shop.js";
 import { tryMove, updateMovement, doWarp } from "./engine/world.js";
-import { startWildBattle, startGymBattle, startTrainerBattle, doTurn, updateBattleAnim } from "./engine/battle.js";
+import { startWildBattle, startGymBattle, startTrainerBattle, updateBattleAnim } from "./engine/battle.js";
 import { healParty } from "./engine/party.js";
 import { newGame, continueGame, hasSave, saveGame } from "./engine/save.js";
 import { renderWorld } from "./render/world_render.js";
 import { renderBattle } from "./render/battle_render.js";
+import { renderShop } from "./render/shop_render.js";
 import { renderTitle, renderCredits } from "./render/scenes.js";
 import { keys, onPress, initInput } from "./input.js";
 
@@ -35,6 +38,7 @@ function render() {
   if (game.state === STATE.TITLE) return renderTitle();
   if (game.state === STATE.CREDITS) return renderCredits();
   if (game.state === STATE.BATTLE) return renderBattle();
+  if (game.state === STATE.SHOP) return renderShop();
   renderWorld();
 }
 
@@ -42,8 +46,8 @@ function frame() { update(); render(); requestAnimationFrame(frame); }
 
 // ---- Test / automation hook ----
 window.__shapemon = {
-  STATE, game, player, flags, battle,
-  MAPS, WARPS, NPCS, DOORS, SPECIES, MOVES, ITEMS, ENCOUNTERS,
+  STATE, game, player, flags, battle, shop,
+  MAPS, WARPS, NPCS, DOORS, NORTH_DOORS, GATES, SPECIES, MOVES, ITEMS, SHOP_STOCK, ENCOUNTERS,
   api: { calcStat, calcDamage, typeEffectiveness, expForLevel, levelForExp, gainExp, expYield, makeCreature, makeMove, makeParty },
   isBlocked, tileAt: (m, x, y) => tileAt(MAPS[m], x, y), isEncounterTile,
   setRng,
@@ -51,7 +55,9 @@ window.__shapemon = {
   setNoEncounter: (v) => { game.noEncounter = !!v; },
   giveStarter: () => { flags.hasStarter = true; player.party = [makeCreature(CONFIG.starter.species, CONFIG.starter.level)]; },
   healParty, warpTo: doWarp,
-  startWildBattle: () => startWildBattle(ENCOUNTERS.town), startGymBattle, startTrainerBattle, doTurn,
+  startWildBattle: (area) => startWildBattle(area || ENCOUNTERS.town),
+  startGymBattle, startTrainerBattle,
+  addItem, itemQty, usableInBattle, buyItem,
   newGame, continueGame, hasSave, saveGame,
   press: onPress,
 };

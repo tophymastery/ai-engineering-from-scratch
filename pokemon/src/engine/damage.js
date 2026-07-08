@@ -6,17 +6,24 @@ import { rand, rrange } from "../core/rng.js";
 
 export const critChance = () => CONFIG.battle.critChance;
 
+// Gen-3 stat-stage multiplier: +n -> (2+n)/2, -n -> 2/(2+n).
+export const stageMult = (stage) => (stage >= 0 ? (2 + stage) / 2 : 2 / (2 - stage));
+
 /* opts: { forceCrit?: boolean, rand?: number(85..100) } for deterministic tests */
 export function calcDamage(attacker, defender, move, opts = {}) {
   const B = CONFIG.battle;
   const crit = opts.forceCrit != null ? opts.forceCrit : rand() < B.critChance;
   const special = isSpecial(move.type);
-  const A = special ? attacker.spAtk : attacker.atk;
-  const Dstat = special ? defender.spDef : defender.def;
+  const st = (cr, k) => (cr.stages ? stageMult(cr.stages[k]) : 1);
+  let A = (special ? attacker.spAtk : attacker.atk) * st(attacker, special ? "spAtk" : "atk");
+  const Dstat = (special ? defender.spDef : defender.def) * st(defender, special ? "spDef" : "def");
+  if (!special && attacker.status === "burn") A *= B.burnAtkMult;   // burn halves Attack
+  A = Math.max(1, Math.floor(A));
+  const D = Math.max(1, Math.floor(Dstat));
 
   // base = floor(floor(floor(2*L/5 + 2) * Power * A / D) / 50) + 2
   let dmg = Math.floor(
-    Math.floor(Math.floor((2 * attacker.level) / 5 + 2) * move.power * A / Dstat) / 50
+    Math.floor(Math.floor((2 * attacker.level) / 5 + 2) * move.power * A / D) / 50
   ) + 2;
 
   if (crit) dmg = Math.floor(dmg * B.critMult);
