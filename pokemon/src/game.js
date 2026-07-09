@@ -19,6 +19,7 @@ import { tryMove, updateMovement, doWarp } from "./engine/world.js";
 import { startWildBattle, startGymBattle, startTrainerBattle, updateBattleAnim } from "./engine/battle.js";
 import { healParty } from "./engine/party.js";
 import { newGame, continueGame, hasSave, saveGame } from "./engine/save.js";
+import { objective } from "./engine/objective.js";
 import { renderWorld } from "./render/world_render.js";
 import { renderBattle } from "./render/battle_render.js";
 import { renderShop } from "./render/shop_render.js";
@@ -58,7 +59,7 @@ window.__shapemon = {
   startWildBattle: (area) => startWildBattle(area || ENCOUNTERS.town),
   startGymBattle, startTrainerBattle,
   addItem, itemQty, usableInBattle, buyItem,
-  newGame, continueGame, hasSave, saveGame,
+  newGame, continueGame, hasSave, saveGame, objective,
   press: onPress,
 };
 
