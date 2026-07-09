@@ -111,7 +111,8 @@ async function winBattle(page) {
         });
         return { bi, cur: b.moveIndex, n: b.ally.moves.length };
       });
-      for (let k = 0; k < (info.bi - info.cur + info.n) % info.n; k++) await tap(page, "down");
+      if ((info.cur ^ info.bi) & 1) await tap(page, "right");   // 2x2 grid: fix column
+      if ((info.cur ^ info.bi) & 2) await tap(page, "down");    // 2x2 grid: fix row
       await tap(page, "z");
     } else {
       await tap(page, "z");   // advance messages / select FIGHT
@@ -133,7 +134,8 @@ async function winCapturing(page, name, needle) {
         b.ally.moves.forEach((m, idx) => { const r = s.api.calcDamage(b.ally, b.enemy, m, { forceCrit: false, rand: 100 }); if (r.dmg > best) { best = r.dmg; bi = idx; } });
         return { bi, cur: b.moveIndex, n: b.ally.moves.length };
       });
-      for (let k = 0; k < (info.bi - info.cur + info.n) % info.n; k++) await tap(page, "down");
+      if ((info.cur ^ info.bi) & 1) await tap(page, "right");   // 2x2 grid: fix column
+      if ((info.cur ^ info.bi) & 2) await tap(page, "down");    // 2x2 grid: fix row
       await tap(page, "z");
     } else await tap(page, "z");
   }
@@ -328,6 +330,36 @@ async function winCapturing(page, name, needle) {
   const evoShot = await winCapturing(page, "19-evolution", "evolv");
   ok("captured an evolution", evoShot);
   ok("Emberling evolved into Blazehound", await page.evaluate(() => window.__shapemon.player.party.some((c) => c.speciesId === "blazehound")));
+
+  // 11d) STATE COVERAGE: navigate every battle sub-state (2x2 command, 2x2
+  //      moves, bag, party) and back, asserting each transition.
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); s.healParty(); s.startWildBattle(); });
+  await toMenu();
+  const phase = () => page.evaluate(() => window.__shapemon.battle.phase);
+  const cmd = () => page.evaluate(() => window.__shapemon.battle.cmd);
+  const mvi = () => page.evaluate(() => window.__shapemon.battle.moveIndex);
+  ok("command menu: starts on FIGHT", (await cmd()) === 0);
+  await tap(page, "right"); ok("command 2x2: right -> PACK", (await cmd()) === 1);
+  await tap(page, "down"); ok("command 2x2: down -> RUN", (await cmd()) === 3);
+  await tap(page, "left"); ok("command 2x2: left -> PKMN", (await cmd()) === 2);
+  await tap(page, "up"); ok("command 2x2: up -> FIGHT", (await cmd()) === 0);
+  await shot(page, "13-battle-command");
+  await tap(page, "z"); ok("FIGHT -> moves", (await phase()) === "moves");
+  const nMoves = await page.evaluate(() => window.__shapemon.battle.ally.moves.length);
+  if (nMoves >= 2) { await tap(page, "right"); ok("moves 2x2: column nav moved cursor", (await mvi()) === 1); await tap(page, "left"); }
+  if (nMoves >= 3) { await tap(page, "down"); ok("moves 2x2: row nav moved cursor", (await mvi()) === 2); await tap(page, "up"); }
+  await shot(page, "14-battle-moves");
+  await tap(page, "x"); ok("moves -> back to command", (await phase()) === "menu");
+  await tap(page, "right"); await tap(page, "z"); ok("PACK -> bag", (await phase()) === "bag");
+  await shot(page, "15-battle-bag");
+  await tap(page, "x"); ok("bag -> back to command", (await phase()) === "menu");
+  // cmd is on PACK(1) now: left -> FIGHT(0), down -> PKMN(2)
+  await tap(page, "left"); await tap(page, "down"); await tap(page, "z"); ok("PKMN -> party", (await phase()) === "party");
+  await tap(page, "x"); ok("party -> back to command", (await phase()) === "menu");
+  // cmd is on PKMN(2) now: right -> RUN(3)
+  await tap(page, "right"); await tap(page, "z");   // RUN
+  for (let i = 0; i < 6; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); }
+  ok("RUN exited the battle", (await S(page)).gstate === "world");
 
   // 12) Gym 1: heal, travel, win -> Leaf Badge (+ prize money).
   await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.healParty(); });
