@@ -28,6 +28,16 @@ eq("grass>water", typeEffectiveness("grass", "water"), 2.0);
 eq("normal=fire", typeEffectiveness("normal", "fire"), 1.0);
 ok("normal is physical", !isSpecial("normal"));
 ok("fire is special", isSpecial("fire"));
+// nine-type chart (gyms 4-8)
+eq("electric>water", typeEffectiveness("electric", "water"), 2.0);
+eq("rock>fire", typeEffectiveness("rock", "fire"), 2.0);
+eq("rock>ice", typeEffectiveness("rock", "ice"), 2.0);
+eq("ice>grass", typeEffectiveness("ice", "grass"), 2.0);
+eq("psychic>poison", typeEffectiveness("psychic", "poison"), 2.0);
+eq("poison>grass", typeEffectiveness("poison", "grass"), 2.0);
+eq("fire>ice", typeEffectiveness("fire", "ice"), 2.0);
+ok("rock/poison are physical", !isSpecial("rock") && !isSpecial("poison"));
+ok("electric/ice/psychic are special", isSpecial("electric") && isSpecial("ice") && isSpecial("psychic"));
 
 // ---------------------------------------------------------------- stat formula
 section("stat formula (Gen-3, IV=EV=0)");
@@ -178,8 +188,22 @@ ok("town gate needs badge 0 and warps north", GATES.town.need === 0 && GATES.tow
 ok("north gym leader has a party", NPCS.gym2[0].party.length >= 1);
 ok("east gym leader has a party", NPCS.gym3[0].party.length >= 1);
 ok("shop stock all valid items", SHOP_STOCK.every((id) => !!ITEMS[id]));
-ok("regions registered", !!MAPS.north && !!MAPS.east && !!MAPS.gym2 && !!MAPS.gym3 && !!MAPS.mart);
-ok("gate chain: town->north->east->credits", GATES.town.warp.map === "north" && GATES.north.warp.map === "east" && GATES.east.credits);
+ok("regions registered", !!MAPS.north && !!MAPS.east && !!MAPS.r4 && !!MAPS.r8 && !!MAPS.gym4 && !!MAPS.gym8 && !!MAPS.mart);
+{
+  const { GYM_BADGES } = await import("../src/data/maps.js");
+  ok("eight gyms defined", GYM_BADGES.length === 8 && GYM_BADGES.every((g, i) => g.badge === i && !!MAPS[g.gymMap]));
+  // gate chain: town->north->east->r4->r5->r6->r7->r8->credits
+  const chain = ["town", "north", "east", "r4", "r5", "r6", "r7", "r8"];
+  let chainOk = true;
+  chain.forEach((r, i) => {
+    const gate = GATES[r];
+    if (!gate || gate.need !== i) chainOk = false;
+    if (i < 7 && (!gate.warp || gate.warp.map !== chain[i + 1])) chainOk = false;
+    if (i === 7 && !gate.credits) chainOk = false;
+  });
+  ok("gate chain town->...->r8->credits", chainOk);
+  for (const g of GYM_BADGES) ok(`gym ${g.badge} leader has a 1-2 party`, NPCS[g.gymMap][0].party.length >= 1);
+}
 
 section("storage PC (deposit / withdraw)");
 {

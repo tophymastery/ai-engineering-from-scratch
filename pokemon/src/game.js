@@ -4,7 +4,7 @@ import { ctx, W, H } from "./core/screen.js";
 import { setRng } from "./core/rng.js";
 import { CONFIG } from "./data/config.js";
 import { STATE, game, player, flags, battle, shop } from "./state.js";
-import { MAPS, WARPS, NPCS, DOORS, NORTH_DOORS, EAST_DOORS, GATES, isBlocked, tileAt, isEncounterTile } from "./data/maps.js";
+import { MAPS, WARPS, NPCS, DOORS, NORTH_DOORS, EAST_DOORS, GATES, GYM_BADGES, isBlocked, tileAt, isEncounterTile } from "./data/maps.js";
 import { SPECIES } from "./data/species.js";
 import { MOVES } from "./data/moves.js";
 import { ITEMS, SHOP_STOCK } from "./data/items.js";
@@ -76,7 +76,7 @@ function frame() { update(); render(); requestAnimationFrame(frame); }
 // ---- Test / automation hook ----
 window.__shapemon = {
   STATE, game, player, flags, battle, shop,
-  MAPS, WARPS, NPCS, DOORS, NORTH_DOORS, EAST_DOORS, GATES, SPECIES, MOVES, ITEMS, SHOP_STOCK, ENCOUNTERS,
+  MAPS, WARPS, NPCS, DOORS, NORTH_DOORS, EAST_DOORS, GATES, GYM_BADGES, SPECIES, MOVES, ITEMS, SHOP_STOCK, ENCOUNTERS,
   api: { calcStat, calcDamage, typeEffectiveness, expForLevel, levelForExp, gainExp, expYield, makeCreature, makeMove, makeParty },
   isBlocked, tileAt: (m, x, y) => tileAt(MAPS[m], x, y), isEncounterTile,
   setRng,

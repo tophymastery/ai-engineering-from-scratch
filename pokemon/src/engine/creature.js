@@ -24,7 +24,7 @@ export function makeCreature(id, level) {
     speciesId: id, name: s.name, type: s.type,
     sprite: s.sprite, base: s.base, expYield: s.expYield,
     level, exp: expForLevel(level),
-    status: "none", sleepTurns: 0,
+    status: "none", sleepTurns: 0, flinched: false,
     stages: { atk: 0, def: 0, spAtk: 0, spDef: 0, speed: 0 },
     moves: movesAtLevel(s, level).map(makeMove),
   };

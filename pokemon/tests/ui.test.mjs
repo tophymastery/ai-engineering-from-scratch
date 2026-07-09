@@ -202,7 +202,7 @@ async function winCapturing(page, name, needle) {
   await talkTo(page, "up");
   await clearDialog(page);
   ok("received starter", (await S(page)).starter === true);
-  ok("objective: advances to Fernwood Gym after the starter", /Fernwood|Leaf Badge/i.test(await page.evaluate(() => window.__shapemon.objective())));
+  ok("objective: advances to the first gym after the starter", /Willow|Fern/i.test(await page.evaluate(() => window.__shapemon.objective())));
   await walkTo(page, 6, 8);          // lab exit door
   ok("exited Lab to town", (await S(page)).map === "town");
 
@@ -312,7 +312,7 @@ async function winCapturing(page, name, needle) {
   ok("captured the catch moment", caughtShot);
 
   // 11) SWITCH the active creature mid-battle (capture the party menu).
-  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); s.player.party.push(s.api.makeCreature("wormling", 6)); s.startWildBattle(); });
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); s.player.party = [s.api.makeCreature("emberling", 12), s.api.makeCreature("wormling", 10)]; s.startWildBattle(); });
   await toMenu();
   const activeBefore = await page.evaluate(() => window.__shapemon.battle.ally.speciesId);
   await tap(page, "down"); await tap(page, "z");     // FIGHT -> PKMN, open party
@@ -544,10 +544,25 @@ async function winCapturing(page, name, needle) {
   ok("gym 3 cleared -> Cinder Badge earned", afterGym3.badge2 === true);
   await clearDialog(page);
 
-  // 17) Final Victory Gate -> credits (the ending).
-  await walkTo(page, 6, 10);   // gym 3 exit
-  ok("back in Cinder after gym 3", (await S(page)).map === "east");
-  await walkTo(page, ED.E.x, ED.E.y);
+  // 17) Gyms 4-8: clear each with a strong team (warp to each gym + battle).
+  await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.player.party = [s.api.makeCreature("blazehound", 55)]; });
+  const GB = await page.evaluate(() => window.__shapemon.GYM_BADGES);
+  for (const g of GB.filter((x) => x.badge >= 3)) {
+    await page.evaluate((gm) => { const s = window.__shapemon; s.healParty(); s.warpTo({ map: gm, x: 6, y: 9, dir: "up" }); }, g.gymMap);
+    ok(`entered ${g.gymMap}`, (await S(page)).map === g.gymMap);
+    await walkTo(page, 6, 3); await talkTo(page, "up"); await clearDialog(page);
+    ok(`gym ${g.badge} battle started`, (await S(page)).gstate === "battle");
+    if (g.badge === 7) await page.screenshot({ path: path.join(shots, "12-gym8-battle.png") });
+    const after = await winBattle(page);
+    ok(`gym ${g.badge} cleared -> badge ${g.badge} earned`, after[`badge${g.badge}`] === true || await page.evaluate((b) => !!window.__shapemon.flags.badges[b], g.badge));
+    await clearDialog(page);
+  }
+  ok("all 8 badges earned", await page.evaluate(() => window.__shapemon.flags.badges.filter(Boolean).length === 8));
+
+  // 18) Final Victory Gate (in Miasma Marsh) -> credits (the ending).
+  await page.evaluate(() => { const s = window.__shapemon; s.warpTo({ map: "r8", x: 11, y: 20, dir: "up" }); });
+  const R8E = await page.evaluate(() => { const s = window.__shapemon; const g = s.MAPS.r8.grid; for (let y = 0; y < g.length; y++) for (let x = 0; x < g[0].length; x++) if (g[y][x] === "E") return { x, y }; return null; });
+  await walkTo(page, R8E.x, R8E.y);
   await clearDialog(page);
   ok("final gate reached the ending", (await S(page)).gstate === "credits");
   await wait(page, 200);

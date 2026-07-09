@@ -158,6 +158,44 @@ export const DOORS = D;
 export const NORTH_DOORS = ND;
 export const EAST_DOORS = ED;
 
+// ---- Gyms 4-8: five more regions, wired via the generic region builder -----
+const LATE = [
+  { region: "r4", idx: 4, town: "Voltage City", badge: 3, leader: "Leader Volt",  mon: "voltling", lv: [20, 22] },
+  { region: "r5", idx: 5, town: "Stonehaven",   badge: 4, leader: "Leader Terra",  mon: "pebblo",   lv: [24, 26] },
+  { region: "r6", idx: 6, town: "Glacia Town",  badge: 5, leader: "Leader Frost",  mon: "frostpup", lv: [28, 30] },
+  { region: "r7", idx: 7, town: "Mindspire",    badge: 6, leader: "Leader Sage",   mon: "mindly",   lv: [32, 34] },
+  { region: "r8", idx: 8, town: "Miasma Marsh", badge: 7, leader: "Leader Venia",  mon: "venuff",   lv: [36, 38] },
+];
+// The gate leading INTO the first late region sits on "east".
+GATES.east = { need: 2, warp: { map: "r4", x: 11, y: 27, dir: "up" } };
+LATE.forEach((g, i) => {
+  const rb = buildRegion(), d = rb.doors;
+  registerMap(g.region, rb.grid, "town");
+  const gymMap = `gym${g.idx}`, centerMap = `center${g.idx}`;
+  registerMap(gymMap, INTERIOR11.map((r) => r.split("")), "interior");
+  registerMap(centerMap, INTERIOR9().map((r) => r.split("")), "interior");
+  EXIT[gymMap] = [6, 10]; EXIT[centerMap] = [6, 8];
+  WARPS[`${g.region}:${d.G.x},${d.G.y}`] = { map: gymMap, x: 6, y: 9, dir: "up" };
+  WARPS[`${g.region}:${d.C.x},${d.C.y}`] = { map: centerMap, x: 6, y: 7, dir: "up" };
+  WARPS[`${gymMap}:${EXIT[gymMap].join(",")}`] = { map: g.region, x: d.G.x, y: d.G.y + 1, dir: "down" };
+  WARPS[`${centerMap}:${EXIT[centerMap].join(",")}`] = { map: g.region, x: d.C.x, y: d.C.y + 1, dir: "down" };
+  const next = LATE[i + 1];
+  GATES[g.region] = next ? { need: g.badge, warp: { map: next.region, x: 11, y: 27, dir: "up" } } : { need: g.badge, credits: true };
+  NPCS[gymMap] = [{ x: 6, y: 2, color: "#d6d6d6", role: "gym", name: g.leader, badge: g.badge, intro: `gym${g.idx}Intro`, done: `gym${g.idx}Done`,
+                    party: [{ species: g.mon, level: g.lv[0] }, { species: g.mon, level: g.lv[1] }] }];
+  NPCS[centerMap] = [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }, { x: 3, y: 2, color: "#8fd0ff", role: "pc", name: "Storage PC" }];
+  NPCS[g.region] = [{ x: 16, y: 22, color: "#c0a060", role: "trainer", dialog: "ace", name: "Ace Trainer",
+                      party: [{ species: g.mon, level: Math.max(2, g.lv[0] - 2) }], defeated: false }];
+});
+
+// Every gym in badge order (for objective text + tests).
+export const GYM_BADGES = [
+  { badge: 0, region: "town", gymMap: "gym", leader: "Leader Fern", town: "Willow Town" },
+  { badge: 1, region: "north", gymMap: "gym2", leader: "Leader Marina", town: "Tidewater Town" },
+  { badge: 2, region: "east", gymMap: "gym3", leader: "Leader Rocco", town: "Cinder Village" },
+  ...LATE.map((g) => ({ badge: g.badge, region: g.region, gymMap: `gym${g.idx}`, leader: g.leader, town: g.town })),
+];
+
 const WALKABLE = new Set([".", "_", ":", "F", "H", "L", "G", "C", "V", "M", "D", "E"]);
 export const tileAt = (map, x, y) => (x < 0 || y < 0 || y >= map.h || x >= map.w) ? "T" : map.grid[y][x];
 export const npcAt = (mapName, x, y) => (NPCS[mapName] || []).find((n) => n.x === x && n.y === y) || null;
