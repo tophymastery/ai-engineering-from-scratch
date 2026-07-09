@@ -170,6 +170,7 @@ async function winCapturing(page, name, needle) {
   ok("new game -> dialog", (await S(page)).gstate === "dialog");
   await clearDialog(page);
   ok("dialog cleared -> world in home", (await S(page)).map === "home");
+  ok("objective: starts by sending you to the Lab", /Lab|starter/i.test(await page.evaluate(() => window.__shapemon.objective())));
 
   // 3) Collision: bump the left/top walls inside the house; position must clamp.
   for (let i = 0; i < 6; i++) await stepDir(page, "left");
@@ -193,6 +194,7 @@ async function winCapturing(page, name, needle) {
   await talkTo(page, "up");
   await clearDialog(page);
   ok("received starter", (await S(page)).starter === true);
+  ok("objective: advances to Fernwood Gym after the starter", /Fernwood|Leaf Badge/i.test(await page.evaluate(() => window.__shapemon.objective())));
   await walkTo(page, 6, 8);          // lab exit door
   ok("exited Lab to town", (await S(page)).map === "town");
 
@@ -468,6 +470,7 @@ async function winCapturing(page, name, needle) {
   await page.screenshot({ path: path.join(shots, "6-gym-battle.png") });
   const afterGym = await winBattle(page);
   ok("gym 1 cleared -> Leaf Badge earned", afterGym.badge0 === true);
+  ok("objective: points to Tidewater after Leaf Badge", /Tidewater/i.test(await page.evaluate(() => window.__shapemon.objective())));
   await clearDialog(page);
 
   // 13) Gate opens: leave gym, walk to the town gate -> warps to Tidewater Town.

@@ -2,6 +2,7 @@
 import { ctx, W, H, SIDEBAR, MAP_VIEW_W } from "../core/screen.js";
 import { CONFIG } from "../data/config.js";
 import { player, flags } from "../state.js";
+import { objective } from "../engine/objective.js";
 
 const INK = "#20222f", PAPER = "#f7f7ef";
 
@@ -108,5 +109,11 @@ export function drawSidebar() {
   } else {
     ctx.fillStyle = "#8a8c9c"; ctx.fillText("(empty)", x + SIDEBAR / 2, py + 20);
   }
+
+  // GOAL: the current guided objective, wrapped at the panel bottom.
+  const gy0 = H - 92;
+  ctx.fillStyle = "#8fb6ff"; ctx.font = "bold 13px 'Courier New', monospace"; ctx.fillText("GOAL", x + SIDEBAR / 2, gy0);
+  ctx.fillStyle = "#e9e9f2"; ctx.font = "11px 'Courier New', monospace"; ctx.textAlign = "center";
+  wrap(objective(), SIDEBAR - 16).slice(0, 4).forEach((ln, i) => ctx.fillText(ln, x + SIDEBAR / 2, gy0 + 20 + i * 15));
   ctx.textAlign = "left";
 }
