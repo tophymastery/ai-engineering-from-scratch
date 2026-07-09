@@ -163,6 +163,14 @@ async function winCapturing(page, name, needle) {
   // 1) Title
   await page.screenshot({ path: path.join(shots, "1-title.png") });
 
+  // 1b) Full-town map overviews (whole tilemap, not just the camera viewport)
+  await page.evaluate(() => window.__shapemon.setOverview("town")); await wait(page, 120);
+  await shot(page, "23-map-willow-town");
+  ok("Willow Town overview rendered", true);
+  await page.evaluate(() => window.__shapemon.setOverview("north")); await wait(page, 120);
+  await shot(page, "24-map-tidewater-town");
+  await page.evaluate(() => window.__shapemon.setOverview(null)); await wait(page, 60);
+
   // 2) New Game -> intro dialog
   await tap(page, "z");
   await wait(page, 150);
