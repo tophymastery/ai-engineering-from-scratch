@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "node serve.mjs 8080",
-    "test": "node tests/logic.test.mjs && node tests/ui.test.mjs",
+    "test": "node tests/logic.test.mjs && node tests/ui.test.mjs && node tests/coverage.test.mjs",
     "test:logic": "node tests/logic.test.mjs",
-    "test:ui": "node tests/ui.test.mjs"
+    "test:ui": "node tests/ui.test.mjs",
+    "test:coverage": "node tests/coverage.test.mjs"
   },
   "license": "MIT",
   "devDependencies": {
