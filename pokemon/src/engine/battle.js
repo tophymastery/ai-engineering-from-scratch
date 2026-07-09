@@ -88,8 +88,9 @@ export function battleInput(a) {
   }
   if (ph === "moves") {
     const n = battle.ally.moves.length;
-    if (a === "down") battle.moveIndex = (battle.moveIndex + 1) % n;
-    if (a === "up") battle.moveIndex = (battle.moveIndex - 1 + n) % n;
+    // 2x2 grid navigation, clamped to existing moves
+    if (a === "left" || a === "right") { const t = battle.moveIndex ^ 1; if (t < n) battle.moveIndex = t; }
+    if (a === "up" || a === "down") { const t = battle.moveIndex ^ 2; if (t < n) battle.moveIndex = t; }
     if (a === "cancel") { battle.phase = "menu"; return; }
     if (a === "action") {
       const mv = battle.ally.moves[battle.moveIndex];

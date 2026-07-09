@@ -5,9 +5,22 @@ import { player, flags } from "../state.js";
 
 const INK = "#20222f", PAPER = "#f7f7ef";
 
-export function drawBox(x, y, w, h) {
-  ctx.fillStyle = PAPER; ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.strokeRect(x + 2, y + 2, w - 4, h - 4);
+export function roundRect(x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+export function drawBox(x, y, w, h, r = 8) {
+  roundRect(x, y, w, h, r); ctx.fillStyle = PAPER; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.stroke();
+  roundRect(x + 4, y + 4, w - 8, h - 8, Math.max(2, r - 4));
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(32,34,47,0.25)"; ctx.stroke();
 }
 
 export function wrap(text, maxW) {
@@ -26,25 +39,40 @@ export function hpColor(frac) {
 const STATUS_TAG = { burn: "BRN", poison: "PSN", paralysis: "PAR", sleep: "SLP" };
 const STATUS_COLOR = { burn: "#e2531f", poison: "#a45bd0", paralysis: "#e6c327", sleep: "#7a8090" };
 
-// shownHp animates; realMax used for the bar scale + optional numbers.
-export function drawHPBox(x, y, cr, shownHp, showNum) {
-  const bw = 216, bh = showNum ? 66 : 52;
-  drawBox(x, y, bw, bh);
+function bar(x, y, w, h, frac, color, track) {
+  roundRect(x, y, w, h, h / 2); ctx.fillStyle = track || "#2b2d3a"; ctx.fill();
+  const fw = Math.max(0, Math.min(1, frac)) * w;
+  if (fw > 1) { roundRect(x, y, Math.max(h, fw), h, h / 2); ctx.save(); ctx.clip(); ctx.fillStyle = color; ctx.fillRect(x, y, fw, h); ctx.restore(); }
+}
+
+// Framed HP box (GBA-style). opts: { num: show HP numbers, exp: 0..1 EXP fraction }
+export function drawHPBox(x, y, cr, shownHp, opts = {}) {
+  const showNum = opts.num, showExp = opts.exp != null;
+  const bw = 224, bh = 44 + (showNum ? 16 : 0) + (showExp ? 20 : 0);
+  drawBox(x, y, bw, bh, 10);
   ctx.fillStyle = INK; ctx.textBaseline = "top";
-  ctx.font = "16px 'Courier New', monospace"; ctx.fillText(cr.name, x + 12, y + 8);
-  ctx.font = "14px 'Courier New', monospace"; ctx.fillText("Lv" + cr.level, x + bw - 46, y + 9);
+  ctx.font = "bold 15px 'Courier New', monospace"; ctx.fillText(cr.name.toUpperCase(), x + 14, y + 9);
+  ctx.font = "14px 'Courier New', monospace"; ctx.fillText("Lv" + cr.level, x + bw - 46, y + 10);
+
+  // "HP" pill + rounded bar
+  const barY = y + 30, pillX = x + 14;
+  roundRect(pillX, barY - 1, 26, 13, 6); ctx.fillStyle = "#e6b800"; ctx.fill();
+  ctx.fillStyle = "#20222f"; ctx.font = "italic bold 11px 'Courier New', monospace"; ctx.fillText("HP", pillX + 5, barY + 1);
+  const barX = pillX + 32, barW = bw - (barX - x) - 14;
+  bar(barX, barY, barW, 9, shownHp / cr.maxhp, hpColor(shownHp / cr.maxhp));
+
   if (cr.status && cr.status !== "none") {
-    ctx.fillStyle = STATUS_COLOR[cr.status]; ctx.fillRect(x + 12, y + 26, 34, 15);
-    ctx.fillStyle = "#fff"; ctx.font = "11px 'Courier New', monospace"; ctx.fillText(STATUS_TAG[cr.status], x + 15, y + 28);
+    ctx.fillStyle = STATUS_COLOR[cr.status]; roundRect(x + bw - 52, y + 8, 40, 15, 4); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "bold 11px 'Courier New', monospace"; ctx.fillText(STATUS_TAG[cr.status], x + bw - 47, y + 10);
   }
-  ctx.fillStyle = INK; ctx.font = "13px 'Courier New', monospace"; ctx.fillText("HP", x + 54, y + 30);
-  const barX = x + 80, barW = 120, barY = y + 32;
-  ctx.fillStyle = "#20222f"; ctx.fillRect(barX - 1, barY - 1, barW + 2, 10);
-  const frac = Math.max(0, shownHp / cr.maxhp);
-  ctx.fillStyle = hpColor(frac); ctx.fillRect(barX, barY, barW * frac, 8);
+  let yy = barY + 14;
   if (showNum) {
-    ctx.fillStyle = INK; ctx.font = "13px 'Courier New', monospace";
-    ctx.fillText(`${Math.round(shownHp)}/${cr.maxhp}`, x + bw - 86, y + 46);
+    ctx.fillStyle = INK; ctx.textAlign = "right"; ctx.font = "13px 'Courier New', monospace";
+    ctx.fillText(`${Math.round(shownHp)}/ ${cr.maxhp}`, x + bw - 14, yy); ctx.textAlign = "left"; yy += 16;
+  }
+  if (showExp) {
+    ctx.fillStyle = INK; ctx.font = "italic bold 10px 'Courier New', monospace"; ctx.fillText("EXP", x + 14, yy + 1);
+    bar(x + 44, yy + 2, bw - 58, 5, opts.exp, "#3f8fe0", "#2b2d3a");
   }
 }
 
