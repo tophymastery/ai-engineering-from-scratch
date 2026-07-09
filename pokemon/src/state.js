@@ -2,7 +2,7 @@
 import { CONFIG } from "./data/config.js";
 
 export const STATE = {
-  TITLE: "title", WORLD: "world", DIALOG: "dialog", BATTLE: "battle", SHOP: "shop", CREDITS: "credits",
+  TITLE: "title", WORLD: "world", DIALOG: "dialog", BATTLE: "battle", SHOP: "shop", PC: "pc", CREDITS: "credits",
 };
 
 export const DIRV = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
@@ -20,6 +20,7 @@ export const player = {
 };
 
 export const shop = { stock: [], index: 0 };
+export const pc = { panel: 0, index: 0 };   // panel 0 = party, 1 = box
 
 export const game = {
   state: STATE.TITLE, afterDialog: null, tick: 0,

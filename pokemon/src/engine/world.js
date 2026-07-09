@@ -3,7 +3,7 @@ import { CONFIG } from "../data/config.js";
 import { MAPS, WARPS, GATES, npcAt, isBlocked, tileAt, isEncounterTile } from "../data/maps.js";
 import { ENCOUNTERS } from "../data/encounters.js";
 import { STORY } from "../data/story.js";
-import { STATE, DIRV, player, game, flags, shop } from "../state.js";
+import { STATE, DIRV, player, game, flags, shop, pc } from "../state.js";
 import { SHOP_STOCK } from "../data/items.js";
 import { rand } from "../core/rng.js";
 import { say } from "./dialog.js";
@@ -96,6 +96,9 @@ export function interact() {
       break;
     case "shop":
       say(STORY.shopWelcome, () => { shop.stock = SHOP_STOCK.slice(); shop.index = 0; game.state = STATE.SHOP; });
+      break;
+    case "pc":
+      say(STORY.pcBoot, () => { pc.panel = 0; pc.index = 0; game.state = STATE.PC; });
       break;
     case "trainer":
       if (npc.defeated) { say([`${npc.name}: Great battle earlier!`]); break; }

@@ -179,6 +179,21 @@ ok("north gym leader has a party", NPCS.gym2[0].party.length >= 1);
 ok("shop stock all valid items", SHOP_STOCK.every((id) => !!ITEMS[id]));
 ok("north map registered", !!MAPS.north && !!MAPS.gym2 && !!MAPS.mart);
 
+section("storage PC (deposit / withdraw)");
+{
+  const { depositToBox, withdrawFromBox } = await import("../src/engine/pc.js");
+  player.party = [makeCreature("emberling", 5), makeCreature("nibbit", 5)];
+  player.box = [makeCreature("wormling", 5)];
+  ok("withdraw moves box -> party", withdrawFromBox(0) && player.party.length === 3 && player.box.length === 0);
+  ok("deposit moves party -> box", depositToBox(2) && player.party.length === 2 && player.box.length === 1);
+  player.party = [makeCreature("emberling", 5)];
+  ok("cannot deposit the last party member", depositToBox(0) === false && player.party.length === 1);
+  player.party = Array.from({ length: 6 }, () => makeCreature("nibbit", 5));
+  player.box = [makeCreature("wormling", 5)];
+  ok("cannot withdraw past the party cap", withdrawFromBox(0) === false && player.party.length === 6);
+  player.party = []; player.box = [];
+}
+
 // ---------------------------------------------------------------- simulated battle
 section("simulated battle: found -> win + level up");
 {
