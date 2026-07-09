@@ -361,6 +361,104 @@ async function winCapturing(page, name, needle) {
   for (let i = 0; i < 6; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); }
   ok("RUN exited the battle", (await S(page)).gstate === "world");
 
+  // 11e) BATTLE SYSTEM DEEP FLOW (long): a strong Emberling faces controlled
+  //      foes to exercise stats, turn order (both directions), effectiveness,
+  //      criticals, a stat-stage move, and every status condition.
+  const cmdOf = () => page.evaluate(() => window.__shapemon.battle.cmd);
+  const ensureCmd0 = async () => { const c = await cmdOf(); if (c & 1) await tap(page, "left"); if (c & 2) await tap(page, "up"); };
+  const useMove = async (name) => {
+    await ensureCmd0(); await tap(page, "z");                       // -> moves
+    const cur = await page.evaluate(() => window.__shapemon.battle.moveIndex);
+    const idx = await page.evaluate((n) => window.__shapemon.battle.ally.moves.findIndex((m) => m.name === n), name);
+    if ((cur ^ idx) & 1) await tap(page, "right");
+    if ((cur ^ idx) & 2) await tap(page, "down");
+    await tap(page, "z");
+  };
+  const msgs = () => page.evaluate(() => window.__shapemon.battle.msg.slice());
+  const advanceAnim = async () => { for (let i = 0; i < 60; i++) { const s = await S(page); if (s.gstate !== "battle" || s.phase !== "anim") return; await tap(page, "z"); } };
+  const exitRun = async () => {
+    if ((await S(page)).gstate !== "battle") return;
+    await ensureCmd0(); await tap(page, "right"); await tap(page, "down"); await tap(page, "z");
+    for (let i = 0; i < 8; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); }
+  };
+  const setupBattle = async (es, el, rngZero) => {
+    await page.evaluate(({ es, el, rngZero }) => {
+      const s = window.__shapemon; s.setRng(rngZero ? () => 0.0 : () => 0.9);
+      const a = s.api.makeCreature("emberling", 25);
+      s.startWildBattle(); s.battle.ally = a; s.battle.enemy = s.api.makeCreature(es, el);
+      s.battle.enemy.maxhp = 400; s.battle.enemy.hp = 400;   // buffer so it survives the observation turns
+      s.battle.enemy.moves = [s.api.makeMove("tackle")];     // no status moves -> keeps the ally state controlled
+      const an = s.battle.anim; an.hpEnemy = an.tgtEnemy = s.battle.enemy.hp; an.hpAlly = an.tgtAlly = a.hp;
+    }, { es, el, rngZero });
+    await toMenu();
+  };
+
+  // (a) all six stats present; turn order (fast ally first); super-effective
+  await setupBattle("bloomworm", 25);
+  ok("all six stats computed", await page.evaluate(() => { const a = window.__shapemon.battle.ally; return ["atk", "def", "spAtk", "spDef", "speed", "maxhp"].every((k) => a[k] > 0); }));
+  await useMove("Ember");
+  let m = await msgs();
+  ok("turn order: faster ally attacks first", m[0].startsWith("Emberling used"));
+  ok("attack: super-effective vs grass", m.some((l) => l.includes("super effective")));
+  await advanceAnim();
+
+  // (b) critical hit (forced via rng=0)
+  await page.evaluate(() => window.__shapemon.setRng(() => 0.0));
+  await useMove("Ember");
+  ok("attack: critical hit occurs (rng=0)", (await msgs()).some((l) => l.includes("critical hit")));
+  await page.evaluate(() => window.__shapemon.setRng(() => 0.9));
+  await advanceAnim();
+
+  // (c) stat stage: Growl lowers the foe's ATK
+  await useMove("Growl");
+  ok("stat stage: Growl lowered foe ATK (message)", (await msgs()).some((l) => l.includes("ATK") && l.includes("fell")));
+  ok("stat stage: foe ATK stage < 0", await page.evaluate(() => window.__shapemon.battle.enemy.stages.atk < 0));
+  await advanceAnim(); await exitRun();
+
+  // (d) reversed turn order (slow ally) + not-very-effective (fire vs water)
+  await setupBattle("dribblet", 5);
+  await page.evaluate(() => { window.__shapemon.battle.ally.stages.speed = -6; });
+  await useMove("Ember");
+  m = await msgs();
+  ok("turn order: slower ally attacks second", m[0].startsWith("Foe "));
+  ok("attack: not-very-effective vs water", m.some((l) => l.includes("not very effective")));
+  await advanceAnim(); await exitRun();
+
+  // (e) POISON: end-of-turn chip damage on the foe
+  await setupBattle("cavvit", 6);
+  await page.evaluate(() => { const e = window.__shapemon.battle.enemy; e.status = "poison"; e.hp = e.maxhp; });
+  await shot(page, "20-status-poison");
+  await useMove("Growl");
+  ok("status POISON: ticks at end of turn", (await msgs()).some((l) => l.toLowerCase().includes("hurt by its poison")));
+  await advanceAnim(); await exitRun();
+
+  // (f) BURN: halves physical attack + end-of-turn chip damage on the ally
+  await setupBattle("cavvit", 6);
+  const physNoBurn = await page.evaluate(() => { const s = window.__shapemon, b = s.battle; return s.api.calcDamage(b.ally, b.enemy, s.MOVES.scratch, { forceCrit: false, rand: 100 }).dmg; });
+  await page.evaluate(() => { window.__shapemon.battle.ally.status = "burn"; });
+  const physBurn = await page.evaluate(() => { const s = window.__shapemon, b = s.battle; return s.api.calcDamage(b.ally, b.enemy, s.MOVES.scratch, { forceCrit: false, rand: 100 }).dmg; });
+  ok("status BURN: halves physical attack", physBurn < physNoBurn);
+  await useMove("Growl");
+  ok("status BURN: ticks at end of turn", (await msgs()).some((l) => l.toLowerCase().includes("hurt by its burn")));
+  await advanceAnim(); await exitRun();
+
+  // (g) PARALYSIS: can fully skip a turn (forced via rng=0)
+  await setupBattle("cavvit", 6, true);
+  await page.evaluate(() => { window.__shapemon.battle.ally.status = "paralysis"; });
+  await useMove("Scratch");
+  ok("status PARALYSIS: skipped turn message", (await msgs()).some((l) => l.includes("paralyzed")));
+  await page.evaluate(() => window.__shapemon.setRng(() => 0.9));
+  await advanceAnim(); await exitRun();
+
+  // (h) SLEEP: asleep skips the turn
+  await setupBattle("cavvit", 6);
+  await page.evaluate(() => { const a = window.__shapemon.battle.ally; a.status = "sleep"; a.sleepTurns = 2; });
+  await shot(page, "21-status-sleep");
+  await useMove("Scratch");
+  ok("status SLEEP: fast asleep message", (await msgs()).some((l) => l.toLowerCase().includes("fast asleep")));
+  await advanceAnim(); await exitRun();
+  await page.evaluate(() => window.__shapemon.healParty());
+
   // 12) Gym 1: heal, travel, win -> Leaf Badge (+ prize money).
   await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.healParty(); });
   await walkTo(page, DOORS.G.x, DOORS.G.y);
