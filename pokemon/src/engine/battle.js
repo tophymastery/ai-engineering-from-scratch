@@ -157,15 +157,26 @@ function changeStage(cr, stat, delta, q, fx) {
 const side = (cr) => (cr === battle.enemy ? "Foe " : "");
 const hpFx = (cr) => ({ hp: { who: cr === battle.enemy ? "enemy" : "ally", val: cr.hp } });
 
+// Smarter AI: usually pick the highest-damage move vs the current ally.
 function pickEnemyMove(enemy) {
   const usable = enemy.moves.filter((m) => m.pp > 0);
-  const pool = usable.length ? usable : [makeMove("struggle")];
-  return pool[rint(pool.length)];
+  if (!usable.length) return makeMove("struggle");
+  if (rand() < 0.25) return usable[rint(usable.length)];   // a little unpredictability
+  let best = usable[0], bestScore = -1;
+  for (const m of usable) {
+    const score = m.power > 0 ? calcDamage(enemy, battle.ally, m, { forceCrit: false, rand: 100 }).dmg : 1;
+    if (score > bestScore) { bestScore = score; best = m; }
+  }
+  return best;
 }
+const faintMsg = (def, q, fx) => { q.push(`${side(def)}${def.name} fainted!`); fx.push({ faint: def === battle.enemy ? "enemy" : "ally" }); };
 
 // One attacker's action within a turn; pushes messages + fx into q/fx.
 function strike(att, def, move, q, fx) {
   if (att.hp <= 0 || def.hp <= 0) return;
+  const actSide = att === battle.enemy ? "enemy" : "ally";
+  // flinch (set by a faster foe's move earlier this turn)
+  if (att.flinched) { att.flinched = false; q.push(`${side(att)}${att.name} flinched and couldn't move!`); fx.push(null); return; }
   // sleep / paralysis gating
   if (att.status === "sleep") {
     if (att.sleepTurns > 0) att.sleepTurns--;
@@ -178,26 +189,34 @@ function strike(att, def, move, q, fx) {
   if (move.pp != null) move.pp = Math.max(0, move.pp - 1);
 
   // accuracy
-  if (rand() * 100 >= move.accuracy) { q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: att === battle.enemy ? "enemy" : "ally" }); q.push("But it missed!"); fx.push(null); return; }
+  if (rand() * 100 >= move.accuracy) { q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: actSide }); q.push("But it missed!"); fx.push(null); return; }
 
   if (move.power > 0) {
-    const res = calcDamage(att, def, move);
-    def.hp = Math.max(0, def.hp - res.dmg);
+    const hits = move.multi || 1;
+    let total = 0, res, hitCount = 0;
+    for (let h = 0; h < hits; h++) { if (def.hp <= 0) break; res = calcDamage(att, def, move); def.hp = Math.max(0, def.hp - res.dmg); total += res.dmg; hitCount++; }
     q.push(`${side(att)}${att.name} used ${move.name}!`);
-    fx.push({ act: att === battle.enemy ? "enemy" : "ally", hit: def === battle.enemy ? "enemy" : "ally", ...hpFx(def) });
+    fx.push({ act: actSide, hit: def === battle.enemy ? "enemy" : "ally", ...hpFx(def) });
+    if (hitCount > 1) { q.push(`Hit ${hitCount} times!`); fx.push(null); }
     if (res.crit) { q.push("A critical hit!"); fx.push(null); }
     if (res.eff >= 2) { q.push("It's super effective!"); fx.push(null); }
     else if (res.eff <= 0.5) { q.push("It's not very effective..."); fx.push(null); }
-    if (def.hp <= 0) { q.push(`${side(def)}${def.name} fainted!`); fx.push({ faint: def === battle.enemy ? "enemy" : "ally" }); return; }
-    if (move.effect && move.effect.status && rand() < (move.effect.chance ?? 1)) applyStatus(def, move.effect.status, q, fx);
-  } else if (move.effect) {
-    q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: att === battle.enemy ? "enemy" : "ally" });
-    if (move.effect.stat) {
-      const target = move.effect.target === "self" ? att : def;
-      changeStage(target, move.effect.stat, move.effect.stages, q, fx);
-    } else if (move.effect.status) {
-      if (!applyStatus(def, move.effect.status, q, fx)) { q.push("But it failed!"); fx.push(null); }
+    if (move.recoil && total > 0) {
+      att.hp = Math.max(0, att.hp - Math.max(1, Math.floor(total * move.recoil)));
+      q.push(`${side(att)}${att.name} is hit by recoil!`); fx.push(hpFx(att));
     }
+    if (def.hp <= 0) { faintMsg(def, q, fx); return; }
+    if (att.hp <= 0) { faintMsg(att, q, fx); return; }
+    if (move.effect && move.effect.status && rand() < (move.effect.chance ?? 1)) applyStatus(def, move.effect.status, q, fx);
+    if (move.effect && move.effect.flinch && rand() < move.effect.flinch) def.flinched = true;
+  } else if (move.heal) {
+    q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: actSide });
+    if (att.hp >= att.maxhp) { q.push("But its HP is already full!"); fx.push(null); }
+    else { att.hp = Math.min(att.maxhp, att.hp + Math.floor(att.maxhp * move.heal)); q.push(`${side(att)}${att.name} regained health!`); fx.push(hpFx(att)); }
+  } else if (move.effect) {
+    q.push(`${side(att)}${att.name} used ${move.name}!`); fx.push({ act: actSide });
+    if (move.effect.stat) changeStage(move.effect.target === "self" ? att : def, move.effect.stat, move.effect.stages, q, fx);
+    else if (move.effect.status) { if (!applyStatus(def, move.effect.status, q, fx)) { q.push("But it failed!"); fx.push(null); } }
   }
 }
 
@@ -216,7 +235,12 @@ function useMove(playerMove) {
   const ally = battle.ally, enemy = battle.enemy;
   const enemyMove = pickEnemyMove(enemy);
   const q = [], fx = [];
-  const allyFirst = effectiveSpeed(ally) === effectiveSpeed(enemy) ? rand() < 0.5 : effectiveSpeed(ally) > effectiveSpeed(enemy);
+  ally.flinched = false; enemy.flinched = false;   // flinch lasts only within a turn
+  // higher move priority acts first, then Speed (ties random)
+  const pr = (m) => m.priority || 0;
+  let allyFirst;
+  if (pr(playerMove) !== pr(enemyMove)) allyFirst = pr(playerMove) > pr(enemyMove);
+  else allyFirst = effectiveSpeed(ally) === effectiveSpeed(enemy) ? rand() < 0.5 : effectiveSpeed(ally) > effectiveSpeed(enemy);
   const order = allyFirst ? [[ally, enemy, playerMove], [enemy, ally, enemyMove]] : [[enemy, ally, enemyMove], [ally, enemy, playerMove]];
   for (const [att, def, mv] of order) { if (att.hp > 0 && def.hp > 0) strike(att, def, mv, q, fx); }
   if (enemy.hp > 0 && ally.hp > 0) { endOfTurnStatus(ally, q, fx); endOfTurnStatus(enemy, q, fx); }

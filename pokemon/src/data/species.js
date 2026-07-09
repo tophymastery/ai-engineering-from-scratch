@@ -74,4 +74,40 @@ export const SPECIES = {
     expYield: 70,
     learnset: [{ level: 1, move: "tackle" }, { level: 1, move: "vinewhip" }, { level: 1, move: "stunspore" }],
   },
+  // --- gym-4-to-8 typed creatures ---
+  voltling: {
+    name: "Voltling", type: "electric",
+    sprite: { shape: "spike", color: "#f7d02c" },
+    base: { hp: 45, atk: 50, def: 40, spAtk: 70, spDef: 50, speed: 78 },
+    expYield: 90,
+    learnset: [{ level: 1, move: "tackle" }, { level: 1, move: "thundershock" }, { level: 12, move: "spark" }, { level: 20, move: "quickstrike" }],
+  },
+  pebblo: {
+    name: "Pebblo", type: "rock",
+    sprite: { shape: "round", color: "#b8a038" },
+    base: { hp: 60, atk: 72, def: 95, spAtk: 30, spDef: 40, speed: 25 },
+    expYield: 95,
+    learnset: [{ level: 1, move: "tackle" }, { level: 1, move: "rockthrow" }, { level: 16, move: "rockslide" }, { level: 20, move: "headbutt" }],
+  },
+  frostpup: {
+    name: "Frostpup", type: "ice",
+    sprite: { shape: "blob", color: "#8fd6e0" },
+    base: { hp: 55, atk: 55, def: 52, spAtk: 65, spDef: 58, speed: 55 },
+    expYield: 100,
+    learnset: [{ level: 1, move: "tackle" }, { level: 1, move: "frostbite" }, { level: 18, move: "icebeam" }, { level: 22, move: "headbutt" }],
+  },
+  mindly: {
+    name: "Mindly", type: "psychic",
+    sprite: { shape: "round", color: "#f85888" },
+    base: { hp: 55, atk: 40, def: 48, spAtk: 82, spDef: 74, speed: 64 },
+    expYield: 110,
+    learnset: [{ level: 1, move: "tackle" }, { level: 1, move: "confusion" }, { level: 20, move: "psybeam" }, { level: 24, move: "recover" }],
+  },
+  venuff: {
+    name: "Venuff", type: "poison",
+    sprite: { shape: "blob", color: "#a86fd0" },
+    base: { hp: 65, atk: 68, def: 62, spAtk: 55, spDef: 64, speed: 48 },
+    expYield: 115,
+    learnset: [{ level: 1, move: "tackle" }, { level: 1, move: "poisonsting" }, { level: 18, move: "sludge" }, { level: 24, move: "takedown" }],
+  },
 };
