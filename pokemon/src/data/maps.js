@@ -119,8 +119,8 @@ export const GATES = {
 
 export const NPCS = {
   lab: [{ x: 6, y: 2, color: "#e6e6e6", role: "prof", name: "Prof. Cedar" }],
-  center: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }],
-  center2: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }],
+  center: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }, { x: 3, y: 2, color: "#8fd0ff", role: "pc", name: "Storage PC" }],
+  center2: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }, { x: 3, y: 2, color: "#8fd0ff", role: "pc", name: "Storage PC" }],
   mart: [{ x: 6, y: 2, color: "#8fd0ff", role: "shop", name: "Clerk" }],
   gym: [{ x: 6, y: 2, color: "#2f9e57", role: "gym", name: "Leader Fern", badge: 0, intro: "gymIntro", done: "gymDone",
           party: [{ species: "thornbud", level: 6 }] }],

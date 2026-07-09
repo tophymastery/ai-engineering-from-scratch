@@ -461,6 +461,31 @@ async function winCapturing(page, name, needle) {
   await advanceAnim(); await exitRun();
   await page.evaluate(() => window.__shapemon.healParty());
 
+  // 11f) STORAGE PC: enter the Heal Center, boot the PC, withdraw + deposit.
+  await page.evaluate(() => {
+    const s = window.__shapemon;
+    s.setNoEncounter(true); s.healParty();
+    while (s.player.party.length < 2) s.player.party.push(s.api.makeCreature("nibbit", 5));
+    if (!s.player.box.length) s.player.box.push(s.api.makeCreature("wormling", 5));
+    s.warpTo({ map: "center", x: 6, y: 7, dir: "up" });
+  });
+  await walkTo(page, 3, 3);
+  await talkTo(page, "up");
+  await clearDialog(page);
+  ok("Storage PC screen opened", (await S(page)).gstate === "pc");
+  await shot(page, "22-storage-pc");
+  const partyN = await page.evaluate(() => window.__shapemon.player.party.length);
+  const boxN = await page.evaluate(() => window.__shapemon.player.box.length);
+  await tap(page, "right"); await tap(page, "z");   // BOX panel -> withdraw
+  ok("PC withdraw grew the party", (await page.evaluate(() => window.__shapemon.player.party.length)) === partyN + 1);
+  ok("PC withdraw shrank the box", (await page.evaluate(() => window.__shapemon.player.box.length)) === boxN - 1);
+  await tap(page, "left"); await tap(page, "z");    // PARTY panel -> deposit
+  ok("PC deposit returned to the box", (await page.evaluate(() => window.__shapemon.player.box.length)) === boxN);
+  await tap(page, "x");
+  ok("exited the Storage PC", (await S(page)).gstate === "world");
+  await walkTo(page, 6, 8);
+  ok("left the Heal Center after PC", (await S(page)).map === "town");
+
   // 12) Gym 1: heal, travel, win -> Leaf Badge (+ prize money).
   await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.healParty(); });
   await walkTo(page, DOORS.G.x, DOORS.G.y);

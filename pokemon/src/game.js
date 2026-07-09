@@ -23,6 +23,7 @@ import { objective } from "./engine/objective.js";
 import { renderWorld } from "./render/world_render.js";
 import { renderBattle } from "./render/battle_render.js";
 import { renderShop } from "./render/shop_render.js";
+import { renderPc } from "./render/pc_render.js";
 import { renderTitle, renderCredits } from "./render/scenes.js";
 import { keys, onPress, initInput } from "./input.js";
 
@@ -40,6 +41,7 @@ function render() {
   if (game.state === STATE.CREDITS) return renderCredits();
   if (game.state === STATE.BATTLE) return renderBattle();
   if (game.state === STATE.SHOP) return renderShop();
+  if (game.state === STATE.PC) return renderPc();
   renderWorld();
 }
 

@@ -81,6 +81,7 @@ export const STORY = {
   },
 
   shopWelcome: ["Clerk: Welcome to the Mart! What can I get you?"],
+  pcBoot: ["You booted up the Storage PC."],
 };
 
 // Rolling credits shown after clearing the final gym.

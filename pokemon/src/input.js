@@ -1,11 +1,12 @@
 /* Keyboard input: held directions for walking + discrete presses routed by
  * game state (title menu, dialog, overworld, battle). */
-import { STATE, game, shop } from "./state.js";
+import { STATE, game, shop, pc, player } from "./state.js";
 import { advanceDialog } from "./engine/dialog.js";
 import { interact, tryMove } from "./engine/world.js";
 import { battleInput } from "./engine/battle.js";
 import { newGame, continueGame, saveGame } from "./engine/save.js";
 import { buyItem } from "./engine/shop.js";
+import { depositToBox, withdrawFromBox } from "./engine/pc.js";
 import { titleOptions } from "./render/scenes.js";
 
 export const keys = new Set();
@@ -28,8 +29,20 @@ export function onPress(a) {
       break;
     case STATE.BATTLE: battleInput(a); break;
     case STATE.SHOP: shopInput(a); break;
+    case STATE.PC: pcInput(a); break;
     case STATE.CREDITS: break;
   }
+}
+
+function pcInput(a) {
+  if (a === "left") pc.panel = 0;
+  if (a === "right") pc.panel = 1;
+  const list = pc.panel === 0 ? player.party : player.box;
+  const n = Math.max(1, list.length);
+  if (a === "up") pc.index = (pc.index - 1 + n) % n;
+  if (a === "down") pc.index = (pc.index + 1) % n;
+  if (a === "action") { (pc.panel === 0 ? depositToBox : withdrawFromBox)(pc.index); pc.index = 0; }
+  if (a === "cancel") { saveGame(); game.state = STATE.WORLD; }
 }
 
 function shopInput(a) {
