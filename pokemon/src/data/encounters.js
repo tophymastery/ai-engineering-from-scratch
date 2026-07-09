@@ -23,4 +23,11 @@ export const ENCOUNTERS = {
       { species: "wormling", min: 8, max: 10, weight: 4 },
     ],
   },
+  east: {
+    rate: 0.16,
+    table: [
+      { species: "cavvit", min: 13, max: 16, weight: 5 },
+      { species: "nibbit", min: 12, max: 15, weight: 5 },
+    ],
+  },
 };

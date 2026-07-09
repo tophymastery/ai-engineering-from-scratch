@@ -173,11 +173,13 @@ function window_less_catch(ball, hp, maxhp) {
 }
 
 section("second region + shop data");
-ok("north gate needs badge 1", GATES.north.need === 1 && GATES.north.credits);
+ok("north gate needs badge 1", GATES.north.need === 1 && GATES.north.warp.map === "east");
 ok("town gate needs badge 0 and warps north", GATES.town.need === 0 && GATES.town.warp.map === "north");
 ok("north gym leader has a party", NPCS.gym2[0].party.length >= 1);
+ok("east gym leader has a party", NPCS.gym3[0].party.length >= 1);
 ok("shop stock all valid items", SHOP_STOCK.every((id) => !!ITEMS[id]));
-ok("north map registered", !!MAPS.north && !!MAPS.gym2 && !!MAPS.mart);
+ok("regions registered", !!MAPS.north && !!MAPS.east && !!MAPS.gym2 && !!MAPS.gym3 && !!MAPS.mart);
+ok("gate chain: town->north->east->credits", GATES.town.warp.map === "north" && GATES.north.warp.map === "east" && GATES.east.credits);
 
 section("storage PC (deposit / withdraw)");
 {

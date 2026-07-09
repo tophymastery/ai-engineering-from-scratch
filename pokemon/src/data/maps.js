@@ -43,8 +43,8 @@ function buildTown() {
   return { grid: g, doors };
 }
 
-// ---- Tidewater Town (post-gym-1 region) ------------------------------------
-function buildNorth() {
+// ---- Post-gym regions (Tidewater, Cinder) share this proven layout ---------
+function buildRegion() {
   const w = 24, h = 30, g = blank(w, h), doors = {};
   border(g);
   rect(g, 10, 3, 11, h - 4, "_");
@@ -68,9 +68,11 @@ const RAW_INTERIOR = {
   lab: INTERIOR9(),
   center: INTERIOR9(),
   center2: INTERIOR9(),
+  center3: INTERIOR9(),
   mart: INTERIOR9(),
   gym: INTERIOR11,
   gym2: INTERIOR11,
+  gym3: INTERIOR11,
   cave: ["===============", "=FFFFFFFFFFFFF=", "=FF=FFFFFFF=FF=", "=FFFFFFFFFFFFF=", "=FF=FFFFFFF=FF=", "=FFFFFFFFFFFFF=", "=FF=FFFFFFF=FF=", "=FFFFFFFFFFFFF=", "=FFFFFFFFFFFFF=", "=======D=======", "==============="],
 };
 
@@ -81,15 +83,16 @@ function registerMap(name, grid, theme) {
   MAPS[name] = { name, grid, w, h: grid.length, theme };
 }
 
-const townB = buildTown(), northB = buildNorth();
+const townB = buildTown(), northB = buildRegion(), eastB = buildRegion();
 registerMap("town", townB.grid, "town");
 registerMap("north", northB.grid, "town");
+registerMap("east", eastB.grid, "town");
 for (const name in RAW_INTERIOR)
   registerMap(name, RAW_INTERIOR[name].map((r) => r.split("")), name === "cave" ? "cave" : "interior");
 
-const D = townB.doors, ND = northB.doors;
+const D = townB.doors, ND = northB.doors, ED = eastB.doors;
 // Interior exit-door coordinates.
-const EXIT = { home: [5, 8], lab: [6, 8], center: [6, 8], center2: [6, 8], mart: [6, 8], gym: [6, 10], gym2: [6, 10], cave: [7, 9] };
+const EXIT = { home: [5, 8], lab: [6, 8], center: [6, 8], center2: [6, 8], center3: [6, 8], mart: [6, 8], gym: [6, 10], gym2: [6, 10], gym3: [6, 10], cave: [7, 9] };
 
 export const WARPS = {
   [`town:${D.H.x},${D.H.y}`]: { map: "home", x: 5, y: 7, dir: "up" },
@@ -100,6 +103,8 @@ export const WARPS = {
   [`town:${D.V.x},${D.V.y}`]: { map: "cave", x: 7, y: 8, dir: "up" },
   [`north:${ND.G.x},${ND.G.y}`]: { map: "gym2", x: 6, y: 9, dir: "up" },
   [`north:${ND.C.x},${ND.C.y}`]: { map: "center2", x: 6, y: 7, dir: "up" },
+  [`east:${ED.G.x},${ED.G.y}`]: { map: "gym3", x: 6, y: 9, dir: "up" },
+  [`east:${ED.C.x},${ED.C.y}`]: { map: "center3", x: 6, y: 7, dir: "up" },
   [`home:${EXIT.home.join(",")}`]: { map: "town", x: D.H.x, y: D.H.y + 1, dir: "down" },
   [`lab:${EXIT.lab.join(",")}`]: { map: "town", x: D.L.x, y: D.L.y + 1, dir: "down" },
   [`center:${EXIT.center.join(",")}`]: { map: "town", x: D.C.x, y: D.C.y + 1, dir: "down" },
@@ -108,24 +113,30 @@ export const WARPS = {
   [`cave:${EXIT.cave.join(",")}`]: { map: "town", x: D.V.x, y: D.V.y + 1, dir: "down" },
   [`gym2:${EXIT.gym2.join(",")}`]: { map: "north", x: ND.G.x, y: ND.G.y + 1, dir: "down" },
   [`center2:${EXIT.center2.join(",")}`]: { map: "north", x: ND.C.x, y: ND.C.y + 1, dir: "down" },
+  [`gym3:${EXIT.gym3.join(",")}`]: { map: "east", x: ED.G.x, y: ED.G.y + 1, dir: "down" },
+  [`center3:${EXIT.center3.join(",")}`]: { map: "east", x: ED.C.x, y: ED.C.y + 1, dir: "down" },
 };
 
 // Badge-gated gates. On stepping onto an 'E' tile the engine looks up the gate
 // for the current map: warp onward if the required badge is earned, else lock.
 export const GATES = {
   town: { need: 0, warp: { map: "north", x: 11, y: 27, dir: "up" } },
-  north: { need: 1, credits: true },
+  north: { need: 1, warp: { map: "east", x: 11, y: 27, dir: "up" } },
+  east: { need: 2, credits: true },
 };
 
 export const NPCS = {
   lab: [{ x: 6, y: 2, color: "#e6e6e6", role: "prof", name: "Prof. Cedar" }],
   center: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }, { x: 3, y: 2, color: "#8fd0ff", role: "pc", name: "Storage PC" }],
   center2: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }, { x: 3, y: 2, color: "#8fd0ff", role: "pc", name: "Storage PC" }],
+  center3: [{ x: 6, y: 2, color: "#ff8fb0", role: "nurse", name: "Nurse" }, { x: 3, y: 2, color: "#8fd0ff", role: "pc", name: "Storage PC" }],
   mart: [{ x: 6, y: 2, color: "#8fd0ff", role: "shop", name: "Clerk" }],
   gym: [{ x: 6, y: 2, color: "#2f9e57", role: "gym", name: "Leader Fern", badge: 0, intro: "gymIntro", done: "gymDone",
           party: [{ species: "thornbud", level: 6 }] }],
   gym2: [{ x: 6, y: 2, color: "#2f7fe0", role: "gym", name: "Leader Marina", badge: 1, intro: "gym2Intro", done: "gym2Done",
            party: [{ species: "dribblet", level: 11 }, { species: "torrentyl", level: 13 }] }],
+  gym3: [{ x: 6, y: 2, color: "#c9a06a", role: "gym", name: "Leader Rocco", badge: 2, intro: "gym3Intro", done: "gym3Done",
+           party: [{ species: "nibbit", level: 16 }, { species: "cavvit", level: 18 }] }],
   town: [
     { x: 10, y: 41, color: "#ffd166", role: "villager", dialog: "kid", name: "Kid" },
     { x: 20, y: 41, color: "#b0855b", role: "villager", dialog: "oldman", name: "Old Man" },
@@ -137,10 +148,15 @@ export const NPCS = {
     { x: 13, y: 26, color: "#8fd0ff", role: "villager", dialog: "swimmer", name: "Swimmer" },
     { x: 16, y: 22, color: "#3f9fff", role: "trainer", dialog: "kai", name: "Sailor Kai", party: [{ species: "dribblet", level: 10 }], defeated: false },
   ],
+  east: [
+    { x: 13, y: 26, color: "#d0b070", role: "villager", dialog: "elder", name: "Elder" },
+    { x: 16, y: 22, color: "#c98a3a", role: "trainer", dialog: "bruno", name: "Ranger Bruno", party: [{ species: "cavvit", level: 15 }, { species: "nibbit", level: 15 }], defeated: false },
+  ],
 };
 
 export const DOORS = D;
 export const NORTH_DOORS = ND;
+export const EAST_DOORS = ED;
 
 const WALKABLE = new Set([".", "_", ":", "F", "H", "L", "G", "C", "V", "M", "D", "E"]);
 export const tileAt = (map, x, y) => (x < 0 || y < 0 || y >= map.h || x >= map.w) ? "T" : map.grid[y][x];

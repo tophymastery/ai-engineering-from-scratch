@@ -22,7 +22,7 @@ const S = (page) => page.evaluate(() => {
   const s = window.__shapemon;
   return { map: s.player.map, x: s.player.x, y: s.player.y, moving: s.player.moving,
            gstate: s.game.state, phase: s.battle.phase, level: s.player.party[0]?.level,
-           exp: s.player.party[0]?.exp, badge0: !!s.flags.badges[0], badge1: !!s.flags.badges[1],
+           exp: s.player.party[0]?.exp, badge0: !!s.flags.badges[0], badge1: !!s.flags.badges[1], badge2: !!s.flags.badges[2],
            party: s.player.party.length, money: s.player.money, starter: s.flags.hasStarter };
 });
 const settle = (page) => page.waitForFunction("!window.__shapemon.player.moving", { timeout: 4000 }).catch(() => {});
@@ -525,14 +525,33 @@ async function winCapturing(page, name, needle) {
   ok("gym 2 cleared -> Tidewater Badge earned", afterGym2.badge1 === true);
   await clearDialog(page);
 
-  // 15) Final gate -> credits (the ending).
+  // 15) Tidewater gate -> Cinder Village.
   await walkTo(page, 6, 10);   // gym 2 exit
   ok("back in Tidewater after gym 2", (await S(page)).map === "north");
   await walkTo(page, ND.E.x, ND.E.y);
+  ok("Tidewater gate warped to Cinder Village", (await S(page)).map === "east");
+  await page.screenshot({ path: path.join(shots, "9-cinder.png") });
+
+  // 16) Gym 3 (Normal). Out-level and win -> Cinder Badge.
+  await page.evaluate(() => { const s = window.__shapemon; s.setNoEncounter(true); s.player.party.unshift(s.api.makeCreature("blazehound", 26)); s.healParty(); });
+  const ED = await page.evaluate(() => window.__shapemon.EAST_DOORS);
+  await walkTo(page, ED.G.x, ED.G.y);
+  ok("entered Gym 3", (await S(page)).map === "gym3");
+  await walkTo(page, 6, 3); await talkTo(page, "up"); await clearDialog(page);
+  ok("gym 3 battle started", (await S(page)).gstate === "battle");
+  await page.screenshot({ path: path.join(shots, "10-gym3-battle.png") });
+  const afterGym3 = await winBattle(page);
+  ok("gym 3 cleared -> Cinder Badge earned", afterGym3.badge2 === true);
+  await clearDialog(page);
+
+  // 17) Final Victory Gate -> credits (the ending).
+  await walkTo(page, 6, 10);   // gym 3 exit
+  ok("back in Cinder after gym 3", (await S(page)).map === "east");
+  await walkTo(page, ED.E.x, ED.E.y);
   await clearDialog(page);
   ok("final gate reached the ending", (await S(page)).gstate === "credits");
   await wait(page, 200);
-  await page.screenshot({ path: path.join(shots, "9-credits.png") });
+  await page.screenshot({ path: path.join(shots, "11-credits.png") });
 
   await browser.close();
   server.close();

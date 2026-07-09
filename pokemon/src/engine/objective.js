@@ -10,5 +10,10 @@ export function objective() {
       ? "Beat Leader Marina at the Tidewater Gym"
       : "Head north through the gate to Tidewater Town";
   }
+  if (!flags.badges[2]) {
+    return player.map === "east"
+      ? "Beat Leader Rocco at the Cinder Gym"
+      : "Take the Tidewater gate to Cinder Village";
+  }
   return "Enter the Victory Gate to finish your journey!";
 }
