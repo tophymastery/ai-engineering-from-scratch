@@ -14,6 +14,20 @@ built to be **fully data-driven** and **completely testable**.
 > PP, and the `level³` EXP curve — because game *mechanics/formulas* are systems,
 > not copyrightable content. Plug your own numbers into `src/data/*` to retune.
 
+## Rebuild blueprint (for AI agents)
+
+`docs/` contains a self-contained spec to recreate this whole game — copy the
+four files into an empty project and follow them:
+
+- **[docs/AGENT.md](docs/AGENT.md)** — the working contract: guardrails (original
+  content only), method, definition of done, environment gotchas, git workflow.
+- **[docs/CONTEXT.md](docs/CONTEXT.md)** — what the game is: architecture, data
+  schemas, exact mechanics/formulas, and the 8-badge world arc.
+- **[docs/PLAN.md](docs/PLAN.md)** — phase-by-phase build order with acceptance
+  criteria.
+- **[docs/SKILL.md](docs/SKILL.md)** — reusable techniques + the **complete test
+  catalog** (all three suites, every assertion).
+
 ## Play
 
 ```bash
