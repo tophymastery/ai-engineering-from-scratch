@@ -48,6 +48,32 @@ const toMenu = async (page) => { for (let i = 0; i < 30; i++) { const s = await 
 const advanceAnim = async (page) => { for (let i = 0; i < 60; i++) { const s = await S(page); if (s.gstate !== "battle" || s.phase !== "anim") return; await tap(page, "z"); } };
 const ensureCmd0 = async (page) => { const c = await page.evaluate(() => window.__shapemon.battle.cmd); if (c & 1) await tap(page, "left"); if (c & 2) await tap(page, "up"); };
 const exitRun = async (page) => { if ((await S(page)).gstate !== "battle") return; await ensureCmd0(page); await tap(page, "right"); await tap(page, "down"); await tap(page, "z"); for (let i = 0; i < 8; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); } };
+const clearDialog = async (page) => { for (let i = 0; i < 24; i++) { if ((await S(page)).gstate !== "dialog") break; await tap(page, "z"); } };
+async function winBattle(page) {
+  for (let i = 0; i < 600; i++) {
+    const st = await S(page);
+    if (st.gstate !== "battle") return;
+    if (st.phase === "moves") {
+      const info = await page.evaluate(() => { const s = window.__shapemon, b = s.battle; let bi = 0, best = -1; b.ally.moves.forEach((m, idx) => { const r = s.api.calcDamage(b.ally, b.enemy, m, { forceCrit: false, rand: 100 }).dmg; if (r > best) { best = r; bi = idx; } }); return { bi, cur: b.moveIndex, n: b.ally.moves.length }; });
+      if ((info.cur ^ info.bi) & 1) await tap(page, "right");
+      if ((info.cur ^ info.bi) & 2) await tap(page, "down");
+      await tap(page, "z");
+    } else await tap(page, "z");
+  }
+}
+// Stand next to an NPC facing it, then interact.
+async function faceInteract(page, map, nx, ny) {
+  const spot = await page.evaluate(({ m, x, y }) => {
+    const s = window.__shapemon, dirs = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }, opp = { up: "down", down: "up", left: "right", right: "left" };
+    for (const d in dirs) { const ax = x + dirs[d][0], ay = y + dirs[d][1]; if (!s.isBlocked(m, ax, ay)) return { ax, ay, face: opp[d] }; }
+    return null;
+  }, { m: map, x: nx, y: ny });
+  if (!spot) return null;
+  await page.evaluate(({ m, x, y, f }) => { const s = window.__shapemon; s.warpTo({ map: m, x, y, dir: f }); s.game.state = s.STATE.WORLD; }, { m: map, x: spot.ax, y: spot.ay, f: spot.face });
+  await tap(page, "z");
+  await wait(page, 60);
+  return S(page);
+}
 
 // Set up a controlled wild battle with a chosen ally + a tanky, tackle-only foe.
 async function setup(page, allySpecies = "blazehound", allyLevel = 50) {
@@ -198,6 +224,99 @@ async function useBagItem(page, id) {
     ok(`skill ${mid}: used + effect`, usedIt && effectOk);
     await advanceAnim(page); await exitRun(page);
   }
+
+  // ---------------------------------------------------------------- NPC roles
+  console.log("# npc roles (dialog / nurse / shop / pc / prof / gym-done)");
+  await page.evaluate(() => { const s = window.__shapemon; s.player.party = [s.api.makeCreature("blazehound", 60)]; s.flags.hasStarter = true; s.flags.badges = [true, true, true, true, true, true, true, true]; s.setRng(() => 0.5); s.setNoEncounter(true); });
+  const allNpcs = await page.evaluate(() => { const out = [], N = window.__shapemon.NPCS; for (const map in N) for (const n of N[map]) out.push({ map, x: n.x, y: n.y, role: n.role, name: n.name }); return out; });
+  let villagers = 0, nurses = 0, shops = 0, pcs = 0, gymsDone = 0;
+  for (const n of allNpcs) {
+    if (n.role === "villager") { const st = await faceInteract(page, n.map, n.x, n.y); ok(`villager ${n.name}@${n.map} talks`, st && st.gstate === "dialog"); await clearDialog(page); villagers++; }
+    else if (n.role === "nurse") { await page.evaluate(() => { window.__shapemon.player.party[0].hp = 1; }); const st = await faceInteract(page, n.map, n.x, n.y); ok(`nurse@${n.map} dialog`, st && st.gstate === "dialog"); await clearDialog(page); ok(`nurse@${n.map} heals`, await page.evaluate(() => { const c = window.__shapemon.player.party[0]; return c.hp === c.maxhp; })); nurses++; }
+    else if (n.role === "shop") { await faceInteract(page, n.map, n.x, n.y); await clearDialog(page); ok(`shop@${n.map} opens`, (await S(page)).gstate === "shop"); await tap(page, "x"); shops++; }
+    else if (n.role === "pc") { await faceInteract(page, n.map, n.x, n.y); await clearDialog(page); ok(`pc@${n.map} opens`, (await S(page)).gstate === "pc"); await tap(page, "x"); pcs++; }
+    else if (n.role === "prof") { const st = await faceInteract(page, n.map, n.x, n.y); ok(`prof@${n.map} dialog`, st && st.gstate === "dialog"); await clearDialog(page); }
+    else if (n.role === "gym") { const st = await faceInteract(page, n.map, n.x, n.y); ok(`gym-done ${n.name} dialog`, st && st.gstate === "dialog"); await clearDialog(page); gymsDone++; }
+  }
+  ok("all heal centers covered", nurses >= 5 && pcs >= 5);
+  ok("mart + villagers + all gyms covered", shops >= 1 && villagers >= 4 && gymsDone === 8);
+
+  // ---------------------------------------------------------------- trainer battles (all)
+  console.log("# trainer battles (all)");
+  const trainerNames = allNpcs.filter((n) => n.role === "trainer");
+  for (const t of trainerNames) {
+    await page.evaluate((tt) => { const s = window.__shapemon; s.player.party = [s.api.makeCreature("blazehound", 60)]; s.player.money = 0; s.setRng(() => 0.5); s.setNoEncounter(true); for (const n of s.NPCS[tt.map]) if (n.role === "trainer" && n.x === tt.x && n.y === tt.y) n.defeated = false; }, t);
+    const st = await faceInteract(page, t.map, t.x, t.y);
+    ok(`trainer ${t.name}@${t.map} intro`, st && st.gstate === "dialog");
+    await clearDialog(page);
+    ok(`trainer ${t.name}@${t.map} battle starts`, (await S(page)).gstate === "battle");
+    await winBattle(page); await clearDialog(page);
+    const done = await page.evaluate((tt) => { for (const n of window.__shapemon.NPCS[tt.map]) if (n.role === "trainer" && n.x === tt.x && n.y === tt.y) return n.defeated; }, t);
+    ok(`trainer ${t.name}@${t.map} defeated + prize`, done === true && (await page.evaluate(() => window.__shapemon.player.money)) > 0);
+  }
+
+  // ---------------------------------------------------------------- gym battles (all 8)
+  console.log("# gym battles (all 8)");
+  const GB = await page.evaluate(() => window.__shapemon.GYM_BADGES);
+  for (const g of GB) {
+    await page.evaluate((b) => { const s = window.__shapemon; s.player.party = [s.api.makeCreature("blazehound", 60)]; s.flags.badges = [true, true, true, true, true, true, true, true]; s.flags.badges[b] = false; s.setRng(() => 0.5); s.setNoEncounter(true); }, g.badge);
+    await page.evaluate((gm) => { const s = window.__shapemon; s.warpTo({ map: gm, x: 6, y: 3, dir: "up" }); s.game.state = s.STATE.WORLD; }, g.gymMap);
+    await tap(page, "z"); await wait(page, 60);
+    ok(`gym ${g.badge} intro`, (await S(page)).gstate === "dialog");
+    await clearDialog(page);
+    ok(`gym ${g.badge} battle starts`, (await S(page)).gstate === "battle");
+    await winBattle(page);
+    ok(`gym ${g.badge} badge earned`, await page.evaluate((b) => !!window.__shapemon.flags.badges[b], g.badge));
+    await clearDialog(page);
+  }
+
+  // ---------------------------------------------------------------- status conditions
+  console.log("# status conditions");
+  for (const [st, needle] of [["poison", "poison"], ["burn", "burn"]]) {
+    await setup(page);
+    await page.evaluate((s) => { window.__shapemon.battle.enemy.status = s; }, st);
+    await page.evaluate(() => { window.__shapemon.battle.ally.moves = [window.__shapemon.api.makeMove("growl")]; });
+    await ensureCmd0(page); await tap(page, "z"); await tap(page, "z");
+    ok(`status ${st} end-of-turn tick`, (await page.evaluate(() => window.__shapemon.battle.msg.slice())).some((l) => l.toLowerCase().includes(`hurt by its ${needle}`)));
+    await advanceAnim(page); await exitRun(page);
+  }
+  await setup(page);   // paralysis skip
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.0); s.battle.ally.status = "paralysis"; s.battle.ally.moves = [s.api.makeMove("scratch")]; });
+  await ensureCmd0(page); await tap(page, "z"); await tap(page, "z");
+  ok("status paralysis can skip a turn", (await page.evaluate(() => window.__shapemon.battle.msg.slice())).some((l) => l.includes("paralyzed")));
+  await page.evaluate(() => window.__shapemon.setRng(() => 0.5)); await advanceAnim(page); await exitRun(page);
+  await setup(page);   // sleep skip
+  await page.evaluate(() => { const s = window.__shapemon; s.battle.ally.status = "sleep"; s.battle.ally.sleepTurns = 2; s.battle.ally.moves = [s.api.makeMove("scratch")]; });
+  await ensureCmd0(page); await tap(page, "z"); await tap(page, "z");
+  ok("status sleep skips a turn", (await page.evaluate(() => window.__shapemon.battle.msg.slice())).some((l) => l.toLowerCase().includes("fast asleep")));
+  await advanceAnim(page); await exitRun(page);
+
+  // ---------------------------------------------------------------- level-up + evolution
+  console.log("# level-up + evolution");
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); const a = s.api.makeCreature("emberling", 8); a.exp = s.api.expForLevel(9) - 1; s.player.party = [a]; s.startWildBattle(); s.battle.ally = a; s.battle.enemy = s.api.makeCreature("nibbit", 3); s.battle.enemy.hp = 1; const an = s.battle.anim; an.hpEnemy = an.tgtEnemy = 1; an.hpAlly = an.tgtAlly = a.hp; });
+  await toMenu(page); await winBattle(page);
+  ok("battle win grants a level-up", await page.evaluate(() => window.__shapemon.player.party[0].level >= 9));
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.9); const a = s.api.makeCreature("emberling", 15); a.exp = s.api.expForLevel(16) - 1; s.player.party = [a]; s.startWildBattle(); s.battle.ally = a; s.battle.enemy = s.api.makeCreature("nibbit", 3); s.battle.enemy.hp = 1; const an = s.battle.anim; an.hpEnemy = an.tgtEnemy = 1; an.hpAlly = an.tgtAlly = a.hp; });
+  await toMenu(page); await winBattle(page);
+  ok("Emberling evolves into Blazehound", await page.evaluate(() => window.__shapemon.player.party[0].speciesId === "blazehound"));
+
+  // ---------------------------------------------------------------- run + blackout
+  console.log("# run + blackout");
+  await setup(page);
+  await ensureCmd0(page); await tap(page, "right"); await tap(page, "down"); await tap(page, "z");
+  for (let i = 0; i < 6; i++) { if ((await S(page)).gstate !== "battle") break; await tap(page, "z"); }
+  ok("run from a wild battle escapes", (await S(page)).gstate === "world");
+  await page.evaluate(() => { const s = window.__shapemon; s.setRng(() => 0.5); const a = s.api.makeCreature("nibbit", 2); a.hp = 1; s.player.party = [a]; s.startWildBattle(); s.battle.enemy = s.api.makeCreature("cavvit", 60); s.battle.enemy.moves = [s.api.makeMove("tackle")]; const an = s.battle.anim; an.hpEnemy = an.tgtEnemy = s.battle.enemy.hp; an.hpAlly = an.tgtAlly = 1; });
+  await toMenu(page); await ensureCmd0(page); await tap(page, "z"); await tap(page, "z");
+  for (let i = 0; i < 24; i++) { if ((await S(page)).gstate === "world") break; await tap(page, "z"); }
+  ok("blackout warps home after a party wipe", (await S(page)).map === "home");
+
+  // ---------------------------------------------------------------- save / continue
+  console.log("# save / continue");
+  await page.evaluate(() => { const s = window.__shapemon; s.player.money = 777; s.flags.badges = [true, false, true, false, false, false, false, false]; s.player.party = [s.api.makeCreature("emberling", 9)]; s.player.box = [s.api.makeCreature("wormling", 6)]; s.player.map = "town"; s.player.x = 7; s.player.y = 17; s.saveGame(); s.player.money = 0; s.flags.badges = []; s.player.party = []; s.player.box = []; s.continueGame(); });
+  ok("save/continue restores money", await page.evaluate(() => window.__shapemon.player.money === 777));
+  ok("save/continue restores badges", await page.evaluate(() => window.__shapemon.flags.badges[0] === true && window.__shapemon.flags.badges[2] === true));
+  ok("save/continue restores party + box", await page.evaluate(() => window.__shapemon.player.party[0]?.speciesId === "emberling" && window.__shapemon.player.box[0]?.speciesId === "wormling"));
 
   await browser.close();
   server.close();
