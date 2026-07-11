@@ -1,0 +1,132 @@
+# customer-bff.v1 — client-shaped BFF contract (02 §4.2). BFFs aggregate service
+# calls but never invent semantics. Same conventions as services (02 §1): /v1
+# paths, snake_case fields, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: customer-bff
+  version: "1.0.0"
+  description: Customer BFF — home feed + order detail aggregation (02 §4.2).
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/customer/home:
+    get:
+      operationId: get_home
+      summary: One payload — stores (search) + fees (pricing) + ratings.
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema: { type: number, example: 13.7563 }
+        - name: lng
+          in: query
+          required: true
+          schema: { type: number, example: 100.5018 }
+      responses:
+        "200":
+          description: Home feed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Home" }
+              example:
+                stores:
+                  - store_id: "mer_01H8XGABCDE"
+                    name: "Som Tam House"
+                    rating: 4.7
+                    delivery_fee: { amount: 1900, currency: "THB" }
+                    eta_minutes: 28
+                next_cursor: null
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/customer/orders/{order_id}:
+    get:
+      operationId: get_order_detail
+      summary: Aggregated order detail for the customer app.
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+      responses:
+        "200":
+          description: Order detail (customer-shaped).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderDetail" }
+              example:
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "ACCEPTED"
+                total: { amount: 42550, currency: "THB" }
+                store_name: "Som Tam House"
+                eta_minutes: 24
+                created_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    Store:
+      type: object
+      required: [store_id, name]
+      properties:
+        store_id: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        delivery_fee: { $ref: "#/components/schemas/Money" }
+        eta_minutes: { type: integer }
+    Home:
+      type: object
+      required: [stores]
+      properties:
+        stores:
+          type: array
+          items: { $ref: "#/components/schemas/Store" }
+        next_cursor:
+          type: [string, "null"]
+          description: "Cursor pagination (02 §1) — null at end."
+    OrderDetail:
+      type: object
+      required: [order_id, status, total, created_at]
+      properties:
+        order_id: { type: string }
+        status: { type: string }
+        total: { $ref: "#/components/schemas/Money" }
+        store_name: { type: string }
+        eta_minutes: { type: integer }
+        created_at: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "ORDER_NOT_FOUND"
+              message: "No order ord_01H8… for this customer."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

@@ -44,15 +44,25 @@ jobs:
         run: make test
 
   contract:
+    # S-T5 merge gates (D30). Both hard-red on violation:
+    #  - contract-validate: OpenAPI conventions (02 §1) + event registry envelope
+    #    (02 §4.3) + D30 additive-only/dual-publish rules + stubgen boot proof,
+    #    with the in-place shape-change fixture asserted expected-fail.
+    #  - pact-verify: file-based Pact broker (contracts/pacts/) replayed against
+    #    the booted placeholder provider, with the broken-pact fixture asserted
+    #    expected-fail ("breaking a published pact => provider build red").
     needs: lint-unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Pact provider verification against the broker — wired in S-T5. Green
-      # placeholder gate until then so the pipeline shape is complete.
-      - name: contract (pact verify) — placeholder
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: contract-validate (registry + OpenAPI + D30 + stubgen)
         working-directory: shop
-        run: echo "contract gate: S-T5 wires the Pact broker; placeholder PASS"
+        run: make contract-validate
+      - name: pact-verify (file-based broker vs booted provider)
+        working-directory: shop
+        run: make pact-verify
 
   build-sign:
     needs: contract

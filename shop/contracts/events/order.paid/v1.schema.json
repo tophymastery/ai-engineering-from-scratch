@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/order.paid/v1.schema.json",
+  "title": "order.paid v1",
+  "description": "Emitted by order → payment, dispatch, notification, settlement. DEPRECATED in favour of order.paid.v2 (see deprecation.yaml) — the `total` → `order_total` rename is a shape change and could not be done additively in-place (D30), so it is a new topic with a dual-publish window.",
+  "x-topic": "order.paid",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "order.paid" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "order" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["order_id", "total", "paid_at"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "payment_id": { "type": "string" },
+        "total": {
+          "type": "object",
+          "required": ["amount", "currency"],
+          "properties": {
+            "amount": { "type": "integer" },
+            "currency": { "type": "string" }
+          }
+        },
+        "paid_at": { "type": "string" }
+      }
+    }
+  }
+}

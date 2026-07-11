@@ -13,7 +13,8 @@ LIBS := errors otel logging flags idempotency sharding testhooks
 .DEFAULT_GOAL := help
 
 .PHONY: help up down seed smoke test test-libs render changed build \
-        backdoor-scan security-scan preview preview-isolation strip-test render-preview
+        backdoor-scan security-scan preview preview-isolation strip-test render-preview \
+        contract-validate pact-verify
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -29,7 +30,15 @@ build: ## Compile the shared libs + gateway + placeholder binaries (prod tags = 
 	@set -e; for l in $(LIBS); do (cd libs/$$l && $(GO) build ./...); done
 	@cd services/_placeholder && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
+	@cd contracts/registryctl && $(GO) build ./...
+	@cd tools/stubgen && $(GO) build ./...
 	@echo "build ok"
+
+contract-validate: ## S-T5/D30 merge gate: OpenAPI conventions + event registry + dual-publish example + stubgen (+ asserted red fixture)
+	@ci/contract-validate.sh
+
+pact-verify: ## S-T5 merge gate: file-based Pact broker verified against the booted placeholder (+ asserted broken-pact red fixture)
+	@ci/pact-verify.sh
 
 seed: ## Seed golden datasets (STUB — real seedctl lands in S-T7)
 	@echo "TODO(S-T7): seed SCENARIO=$${SCENARIO:-demo-small} via seedctl + factories."

@@ -1,0 +1,47 @@
+{
+  "consumer": { "name": "customer-bff" },
+  "provider": { "name": "placeholder" },
+  "metadata": {
+    "note": "File-based Pact (real pact-broker binaries are unavailable in this env). registryctl pact-verify replays each interaction against the actually-running placeholder service (S-T1/S-T3) and asserts status + response shape. This gates CI (pact-verify stage). Shape = every key present in `response.body` must appear in the provider's JSON; scalar values given here must match exactly.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "health probe",
+      "request": {
+        "method": "GET",
+        "path": "/healthz"
+      },
+      "response": {
+        "status": 200,
+        "headers": { "Content-Type": "application/json" },
+        "body": {
+          "status": "ok",
+          "service": "placeholder"
+        }
+      }
+    },
+    {
+      "description": "idempotent kv echo — POST creates and echoes the pair (02 §3 mutation)",
+      "request": {
+        "method": "POST",
+        "path": "/kv",
+        "headers": {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "idem_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+        },
+        "body": { "key": "pact_probe", "value": "hello" }
+      },
+      "response": {
+        "status": 201,
+        "headers": { "Content-Type": "application/json" },
+        "body": {
+          "tenant": "base",
+          "key": "pact_probe",
+          "value": "hello",
+          "op": "set"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "consumer": { "name": "customer-bff" },
+  "provider": { "name": "placeholder" },
+  "metadata": {
+    "note": "EXPECTED-FAIL fixture (like the S-T2 backdoor fixture). This pact adds an interaction the provider does NOT implement — a real GET /v1/orders/{id} order-detail endpoint. The placeholder's catch-all answers 200 but the body has no order_id/status/total, so registryctl pact-verify MUST report a missing-key shape violation and exit nonzero. Proves 'breaking a published pact => provider build red'.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "health probe (this one is satisfiable)",
+      "request": { "method": "GET", "path": "/healthz" },
+      "response": {
+        "status": 200,
+        "body": { "status": "ok", "service": "placeholder" }
+      }
+    },
+    {
+      "description": "order detail — provider is MISSING this interaction",
+      "request": { "method": "GET", "path": "/v1/orders/ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" },
+      "response": {
+        "status": 200,
+        "body": {
+          "order_id": "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T",
+          "status": "ACCEPTED",
+          "total": { "amount": 42550, "currency": "THB" }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/envelope.schema.json",
+  "title": "Shop event envelope (02 §4.3)",
+  "description": "The envelope every Kafka message carries. Each topic's <version>.schema.json embeds this shape and narrows `event_type` (const) + `payload` (topic-specific). registryctl asserts every topic schema conforms to this envelope. Evolution is governed by D30: additive-only within a topic; a shape change is a new .v2 topic with a dual-publish window + enforced deprecation date.",
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "description": "Prefixed ULID evt_… — dedupe key in the consumer inbox." },
+    "event_type": { "type": "string", "description": "Topic name, e.g. order.paid." },
+    "occurred_at": { "type": "string", "description": "RFC 3339 UTC." },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "type": "string" },
+        "id": { "type": "string", "description": "prefixed ULID — never PII" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": { "type": "object" }
+  }
+}

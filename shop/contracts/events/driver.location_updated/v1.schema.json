@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/driver.location_updated/v1.schema.json",
+  "title": "driver.location_updated v1",
+  "description": "Sampled telemetry; tracking → dispatch, customer tracking. Key region:driver_id (02 §4.3). On the telemetry cluster (D5/D14). D30: additive-only within this topic.",
+  "x-topic": "driver.location_updated",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "driver.location_updated" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "driver" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["driver_id", "h3_cell", "lat", "lng", "recorded_at"],
+      "properties": {
+        "driver_id": { "type": "string", "description": "drv_ token — never PII (D3)." },
+        "h3_cell": { "type": "string", "description": "H3 res-7 cell (D15)." },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "recorded_at": { "type": "string" }
+      }
+    }
+  }
+}
