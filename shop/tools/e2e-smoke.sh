@@ -116,6 +116,51 @@ NOTE='{"channel":"PUSH","recipient":"'"$RECIPIENT"'","template":"order_delivered
 assert_body   "notify-sink captured push" POST /notify-sink/v1/send 'message_id' "$NOTE"
 assert_body   "notify-sink inbox has it"  GET "/notify-sink/v1/inbox?recipient=$RECIPIENT" '"count":1'
 
+# --- 11. V-T1 edge auth (D4) — GATED on the identity slot being REAL so the
+# all-stubs smoke stays green (the identity stub can't issue/verify tokens). ---
+echo "== V-T1 edge auth (register->login->authed->forged->revoke) =="
+IDENTITY_MODE="$(awk -F'\t' '$1=="identity"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$IDENTITY_MODE" != "real" ]; then
+  echo "  SKIP: identity slot mode='$IDENTITY_MODE' (not real) — auth section runs only when identity-auth is the real slot"
+else
+  AEMAIL="diner_e2e_$$@example.com"
+  APW="hunter2pass"
+  CREDS='{"email":"'"$AEMAIL"'","password":"'"$APW"'"}'
+  # Register + login THROUGH the BFF passthrough (gateway routes /customer-bff/v1/auth/* to identity-auth).
+  assert_status "auth register via customer-bff" POST /customer-bff/v1/auth/register 201 "$CREDS"
+  LOGIN="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/auth/login" -H 'Content-Type: application/json' -d "$CREDS" 2>/dev/null)"
+  ACCESS="$(printf '%s' "$LOGIN" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
+  REFRESH="$(printf '%s' "$LOGIN" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')"
+  if [ -n "$ACCESS" ] && [ -n "$REFRESH" ]; then pass "login via customer-bff issued access+refresh tokens"; else bad "login missing tokens (${LOGIN:0:160})"; fi
+
+  # Authed request verified LOCALLY at the gateway (no call to identity on the hot path) -> 200.
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer $ACCESS" "$GW/order/healthz" 2>/dev/null)"
+  if [ "$code" = 200 ]; then pass "authed request verified at gateway ($code)"; else bad "authed request -> $code want 200"; fi
+
+  # Forged (bad-signature) token rejected 401 with the AUTH_TOKEN_INVALID envelope.
+  FORGED="eyJhbGciOiJFUzI1NiIsImtpZCI6ImtfZm9yZ2VkIn0.eyJzdWIiOiJ1c3JfZXZpbCJ9.Zm9yZ2Vk"
+  fbody="$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $FORGED" "$GW/order/healthz" 2>/dev/null)"
+  if [ "$fbody" = 401 ]; then pass "forged token rejected at gateway (401)"; else bad "forged token -> $fbody want 401"; fi
+
+  # Refresh rotates the refresh token.
+  assert_status "refresh rotates via customer-bff" POST /customer-bff/v1/auth/refresh 200 '{"refresh_token":"'"$REFRESH"'"}'
+
+  # Revocation propagates to the edge within the poll window (<=30s SLO; 5s poll here).
+  L2="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/auth/login" -H 'Content-Type: application/json' -d "$CREDS" 2>/dev/null)"
+  A2="$(printf '%s' "$L2" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
+  R2="$(printf '%s' "$L2" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')"
+  pre="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer $A2" "$GW/order/healthz" 2>/dev/null)"
+  if [ "$pre" = 200 ]; then pass "fresh session passes before revoke ($pre)"; else bad "fresh session -> $pre want 200"; fi
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/identity/v1/auth/revoke" -H 'Content-Type: application/json' -d '{"refresh_token":"'"$R2"'"}' 2>/dev/null
+  t0="$(date +%s)"; revoked=0; lag=0
+  for _ in $(seq 1 32); do
+    c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H "Authorization: Bearer $A2" "$GW/order/healthz" 2>/dev/null)"
+    if [ "$c" = 401 ]; then revoked=1; lag=$(( $(date +%s) - t0 )); break; fi
+    sleep 1
+  done
+  if [ "$revoked" = 1 ]; then pass "revoked token rejected in ${lag}s (<=30s SLO, 5s poll)"; else bad "revoked token still accepted after 30s"; fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

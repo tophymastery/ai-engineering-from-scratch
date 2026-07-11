@@ -62,8 +62,98 @@ paths:
                 created_at: "2026-07-11T02:15:00Z"
         default:
           $ref: "#/components/responses/Error"
+
+  # --- V-T1 auth passthroughs (D4). The customer app registers/logs in/refreshes
+  # through the BFF. IMPLEMENTATION NOTE: the E2E BFF slot is a contract stub, so
+  # today the GATEWAY routes /customer-bff/v1/auth/* DIRECTLY to identity-auth
+  # (gateway/main.go bffsWithAuthPassthrough). When a BFF slice ships richer auth
+  # flows it will front identity itself; the request/response contract below is
+  # the stable shape either way. Additive-only (D30).
+  /v1/auth/register:
+    post:
+      operationId: customer_register
+      summary: Register a customer account (passthrough to identity-auth).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "201":
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegisteredUser" }
+              example: { user_id: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", email: "diner@example.com", role: "customer" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/auth/login:
+    post:
+      operationId: customer_login
+      summary: Log in (passthrough to identity-auth) — returns an access+refresh token pair.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "200":
+          description: Token pair.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+              example: { access_token: "eyJhbGciOiJFUzI1NiJ9...", refresh_token: "rft_...", token_type: "Bearer", expires_in: 900, expires_at: "2026-07-11T02:30:00Z", user_id: "usr_...", session_id: "ses_...", role: "customer" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/auth/refresh:
+    post:
+      operationId: customer_refresh
+      summary: Rotate the refresh token (passthrough to identity-auth).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string, example: "rft_01h8xgj2q7z9bq3m4n5p6r7s8t" }
+      responses:
+        "200":
+          description: New (rotated) token pair.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        default:
+          $ref: "#/components/responses/Error"
 components:
   schemas:
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, example: "diner@example.com" }
+        password: { type: string, example: "correct horse battery staple" }
+    RegisteredUser:
+      type: object
+      required: [user_id, email, role]
+      properties:
+        user_id: { type: string }
+        email: { type: string }
+        role: { type: string }
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, expires_at, user_id, session_id, role]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer }
+        expires_at: { type: string }
+        user_id: { type: string }
+        session_id: { type: string }
+        role: { type: string }
+        kid: { type: string }
     Money:
       type: object
       required: [amount, currency]

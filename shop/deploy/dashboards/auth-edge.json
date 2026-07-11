@@ -1,0 +1,68 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T1 / D4 edge-auth plane. Panels bind to the metrics the gateway/identity-auth export (also driving deploy/alerts/auth.yaml). Provisioned per cell via the {cell} template var. This is a template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Auth — Edge Verification & Revocation (V-T1 / D4)",
+  "uid": "auth-edge-v-t1",
+  "tags": ["identity-and-trust", "auth", "D4", "V-T1"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "cell", "type": "query", "query": "label_values(gateway_auth_requests_total, cell)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Edge verification latency p50/p99 (SLO < 1ms p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.001 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gateway_auth_verify_seconds_bucket{cell=~\"$cell\"}[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gateway_auth_verify_seconds_bucket{cell=~\"$cell\"}[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Revocation lag — denylist snapshot age (SLO <= 30s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 20 }, { "color": "red", "value": 30 } ] } } },
+      "targets": [
+        { "expr": "max(gateway_denylist_age_seconds{cell=~\"$cell\"}) by (cell)", "legendFormat": "{{cell}} snapshot age" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Auth outcome rate (verified vs rejected by code)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(gateway_auth_requests_total{cell=~\"$cell\"}[5m])) - sum(rate(gateway_auth_rejected_total{cell=~\"$cell\"}[5m]))", "legendFormat": "verified" },
+        { "expr": "sum(rate(gateway_auth_rejected_total{cell=~\"$cell\"}[5m])) by (code)", "legendFormat": "rejected {{code}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "JWKS health — cached keys & fetch failures",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "min(gateway_jwks_keys{cell=~\"$cell\"}) by (cell)", "legendFormat": "{{cell}} keys cached" },
+        { "expr": "sum(rate(gateway_jwks_fetch_failures_total{cell=~\"$cell\"}[5m]))", "legendFormat": "fetch failures/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Identity-auth availability DECOUPLED from authed traffic (D4 invariant)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "description": "During an identity-auth outage, 'authed 5xx/401 on pre-issued tokens' must stay flat while 'login error rate' spikes — verification runs off cached JWKS, no hot-path call to identity.",
+      "targets": [
+        { "expr": "up{job=\"identity-auth\", cell=~\"$cell\"}", "legendFormat": "identity-auth up" },
+        { "expr": "sum(rate(gateway_auth_rejected_total{cell=~\"$cell\", code=\"AUTH_TOKEN_INVALID\"}[5m]))", "legendFormat": "edge rejects (should be flat during outage)" }
+      ]
+    }
+  ]
+}

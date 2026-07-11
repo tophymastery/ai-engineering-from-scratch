@@ -24,6 +24,14 @@ spec:
               value: "8080"
             - name: PLACEHOLDER_URL
               value: "http://placeholder:8081"
+            # V-T1/D4 edge auth. Default ON in base (dev/staging/preview) and in
+            # the shared E2E env; the prod overlay flips it OFF until rollout
+            # (deploy/overlays/prod). With no bearer token presented the verifier
+            # is a no-op, so enabling it is safe ahead of clients sending tokens.
+            - name: FLAG_AUTH_JWT_EDGE
+              value: "true"
+            - name: DENYLIST_POLL
+              value: "5s"
           readinessProbe:
             httpGet:
               path: /healthz

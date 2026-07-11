@@ -690,3 +690,89 @@ ci/post-merge-smoke.sh pricing-promo  # merge-webhook target: PAGEs the owning t
 make e2e-down --reset               # tear down + clear swaps
 ./ci/run-local.sh                   # FULL 13-stage pipeline incl. the E2E stage — exits 0
 ```
+
+---
+
+# V-T1 Verification (Identity & sessions slice — D4 stateless edge auth)
+
+## What was built
+
+- **`libs/edgeauth`** (shared, std-lib-only): ES256 JWT sign/verify (raw r||s,
+  strict base64url decode), EC P-256 JWK/JWKS encode/decode with thumbprint kids,
+  and the bloom-filter denylist (double-hashing, base64 snapshot + k/m/version).
+  Imported by BOTH the issuer and the verifier so their crypto/bit-layout cannot
+  drift.
+- **`services/identity-auth`** (Go, SQLite via `database/sql` + a PG migration,
+  per the S-T3 pattern): `POST /v1/auth/{register,login,refresh,revoke}`,
+  `GET /v1/auth/denylist`, `GET /.well-known/jwks.json`, ops-only
+  `POST /v1/auth/keys:{rotate,retire}`. PBKDF2-HMAC-SHA256 password hashing
+  (Go 1.24 `crypto/pbkdf2`, std lib). 15-min ES256 access tokens (kid header) +
+  opaque server-side refresh tokens (stored as a hash, rotated on refresh).
+- **Gateway** (`gateway/auth.go`): local ES256 verification from a cached JWKS
+  (refresh-on-unknown-kid, throttled) + a polled bloom denylist (`DENYLIST_POLL`,
+  5 s); injects `X-Auth-Subject`/`X-Auth-Role`, and ALWAYS strips inbound spoofed
+  copies of those headers. Flag `auth_jwt_edge`. BFF `/v1/auth/*` passthroughs
+  routed to identity-auth at the gateway.
+- **Contracts**: `identity.v1.yaml` extended additively (register/login/refresh/
+  revoke/denylist); `customer-bff`/`driver-bff` gained `/v1/auth/*` passthroughs;
+  new pact `customer-bff__identity-auth` (register + login) verified against the
+  REAL service.
+- **E2E**: topology `identity` slot has a real `real_cmd` (`tools/identity-realcmd.sh`);
+  `make e2e-sync` swaps it in; `e2e-smoke.sh` gained an AUTH section gated on the
+  identity slot being real.
+- **Ops**: `deploy/alerts/auth.yaml` (revocation-lag, JWKS-fetch-failure,
+  auth-error-rate; lint-verified via `make render-events`),
+  `deploy/dashboards/auth-edge.json`, `docs/runbooks/key-rotation.md` +
+  `tools/rotate-keys-demo.sh` rehearsal, prod-overlay flag OFF.
+
+## DoD / test-criteria matrix
+
+| Item | Status | Evidence |
+|---|---|---|
+| Demo-able end-to-end via BFF endpoints (flag on) | **full** | `e2e-smoke` AUTH §: register→login→authed→forged→refresh→revoke, 28/28 |
+| Unit/contract/integration/E2E green | **full** | `make test` (edgeauth+identity-auth+gateway `-race`), `pact-verify`, `e2e-smoke`, `run-local` exit 0 |
+| Key-rotation runbook rehearsed | **full** | `tools/rotate-keys-demo.sh` 13/13 + `TestKeyRotationRunbook` |
+| Gateway verify adds < 1 ms p99 | **full** | `TestCriterion_P99LatencyDelta`: unauthed p99 8.9 µs, authed 290 µs, **delta 281 µs** (< 1 ms, under `-race`) |
+| Forged/expired/tampered rejected 100% | **full** | `TestForgedTamperedExpired_1000` + `TestCriterion_ForgedExpiredTampered1000`: **1000/1000 = 100%** (both lib and gateway) |
+| Revoked token rejected ≤ 30 s | **full** | `TestCriterion_RevocationLag`: **211 ms** at 200 ms poll; `e2e-smoke`: **5 s** at 5 s poll |
+| identity-auth outage ⇒ authed error rate unchanged | **adapted** | see below |
+| Dashboards + revocation-lag alert; SLO + ownership.yaml | **full/render-only** | `deploy/alerts/auth.yaml` lint-clean; `deploy/dashboards/auth-edge.json`; `ownership.yaml` identity→Identity & Trust (verified, already correct) |
+
+## Deviations (adapted, not skipped)
+
+1. **10-min outage → 60–90 s honest test.** `TestCriterion_IdentityOutage`
+   warms the gateway JWKS+denylist cache, pre-issues 200 tokens, then **fully
+   closes** the identity server and asserts **200/200 pre-issued tokens still
+   verify at the edge (0 errors)** — the D4 invariant that would hold for a
+   10-min (or any-length) outage, because verification makes **no hot-path call
+   to identity**. A token with an unknown kid (a "new login" needing a key the
+   edge can't fetch) is correctly rejected. "Only new logins/refreshes/
+   revocations fail" is identity-auth's side, out of the gateway test's scope.
+2. **Password KDF = PBKDF2-HMAC-SHA256** (Go 1.24 std `crypto/pbkdf2`, 210k
+   iterations, per-user salt) rather than bcrypt/argon2, keeping the build
+   pure-stdlib (no `x/crypto` download); the task permits an equivalent std-lib
+   KDF.
+3. **JWKS + key-rotation endpoints are runtime/ops paths, not in the OpenAPI
+   contract** (like `/healthz`) — `contract-validate` requires every contract
+   path under `/v1/`; `/.well-known/jwks.json` and `:rotate/:retire` are served
+   natively and documented in the contract header + runbook.
+4. **`real_cmd` builds+execs the real identity-auth binary** (`tools/identity-realcmd.sh`),
+   unlike the generic stub-alias `tools/e2e-realcmd.sh`: identity is the FIRST
+   real slice, so its slot boots the actual merged service.
+5. **Dashboards/alerts are templates** (no live Prometheus/Grafana here) — YAML
+   lint-verified; metric names (`gateway_auth_verify_seconds`,
+   `gateway_denylist_age_seconds`, `gateway_jwks_*`, `gateway_auth_*`) are the
+   seam a real exporter fills.
+
+## Commands to reproduce
+
+```
+cd libs/edgeauth        && go test -race ./...          # crypto + bloom (incl. 1000-mutation)
+cd services/identity-auth && go test -race ./...        # register/login/refresh/revoke/rotation
+cd gateway              && go test -race ./...          # 4 criteria: p99, forged×1000, revocation, outage
+make e2e-sync && make e2e-up && make e2e-smoke          # identity real; AUTH §, 28/28
+tools/e2e-down.sh --reset && rm -f .run/e2e-overlay.yaml && make e2e-up && make e2e-smoke  # all-stubs, 21/21 (AUTH skipped)
+tools/rotate-keys-demo.sh                               # key-rotation runbook rehearsal, 13/13
+ci/pact-verify.sh                                       # customer-bff→identity-auth pact vs real service
+./ci/run-local.sh                                       # FULL 13-stage pipeline — exits 0
+```
