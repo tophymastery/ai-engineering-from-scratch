@@ -1,0 +1,59 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ranking
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: discovery
+    slice: V-T5
+    decisions: D17
+spec:
+  groups:
+    # SLOs (V-T5):
+    #   - re-rank adds < 50 ms p99 (top-500 -> top-50)
+    #   - ranking outage => feed availability >= 99.9% via auto-fallback < 10 s
+    #   - the static fallback (ranking_ml OFF / breaker open) doubles as shed L1 (D12)
+    - name: ranking.latency
+      rules:
+        - alert: RankingRerankLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(ranking_rerank_duration_seconds_bucket[5m])) by (le)) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "ranking re-rank p99 > 50ms"
+            description: "The top-500 -> top-50 re-rank is burning its 50ms p99 budget. Check feature-store read latency and candidate-set size. Runbook: docs/runbooks/ranking.md."
+
+    - name: ranking.availability
+      rules:
+        - alert: RankingFeedAvailabilityLow
+          expr: sum(rate(ranking_requests_total{outcome="served"}[5m])) / sum(rate(ranking_requests_total[5m])) < 0.999
+          for: 5m
+          labels:
+            severity: critical
+            team: discovery
+          annotations:
+            summary: "ranking feed availability < 99.9%"
+            description: "The browse feed is failing to serve a re-ranked (or static-fallback) result. Auto-fallback should keep this at 100% during a model outage. Runbook: docs/runbooks/ranking.md."
+        - alert: RankingAutoFallbackEngaged
+          expr: max(ranking_fallback_engaged) > 0
+          for: 1m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "ranking auto-fallback engaged (serving static ranking)"
+            description: "The model-health breaker is OPEN: the feed is serving the static ranking (= shed-ladder L1). Feed availability is protected, but personalisation is degraded. Check the model-serving path. Expected transiently during a model deploy. Runbook: docs/runbooks/ranking.md."
+
+    - name: ranking.features
+      rules:
+        - alert: RankingSignalConsumerLag
+          expr: max(ranking_signal_inbox_lag_seconds) > 300
+          for: 10m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "ranking feature-store signal lag > 5m"
+            description: "ranking.signal consumption is lagging, so popularity/CTR features are stale and the ML order drifts toward the static order. Check the consumer group / bus. Not a correctness risk (features are additive aggregates). Runbook: docs/runbooks/ranking.md."

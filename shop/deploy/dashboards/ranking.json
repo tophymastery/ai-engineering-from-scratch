@@ -1,0 +1,66 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T5 ranking slice. Panels bind to the metrics ranking exports (also driving deploy/alerts/ranking.yaml): re-rank latency (p99 < 50ms budget), feed availability across model outages (>= 99.9% via auto-fallback), the ML-vs-static scorer mix, the auto-fallback breaker state, and the event-fed feature store. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Ranking — Re-rank, Auto-fallback & Feature Store (V-T5)",
+  "uid": "ranking-v-t5",
+  "tags": ["discovery", "ranking", "re-rank", "fallback", "features", "D17", "V-T5"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(ranking_requests_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Re-rank latency p99 (SLO < 50ms) — top-500 -> top-50",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.03 }, { "color": "red", "value": 0.05 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(ranking_rerank_duration_seconds_bucket{region=~\"$region\"}[5m])) by (le))", "legendFormat": "re-rank p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Feed availability (SLO >= 99.9%) — protected by auto-fallback",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.999 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(ranking_requests_total{outcome=\"served\",region=~\"$region\"}[5m])) / sum(rate(ranking_requests_total{region=~\"$region\"}[5m]))", "legendFormat": "availability" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Scorer mix — ML re-rank vs static fallback (shed L1)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(ranking_requests_total{scorer=\"ml\",region=~\"$region\"}[5m]))", "legendFormat": "ml re-rank/s" },
+        { "expr": "sum(rate(ranking_requests_total{scorer=\"static\",region=~\"$region\"}[5m]))", "legendFormat": "static fallback/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Auto-fallback breaker (0=closed/ML, 1=open/static)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "max": 1, "min": 0 } },
+      "targets": [
+        { "expr": "max(ranking_fallback_engaged{region=~\"$region\"})", "legendFormat": "fallback engaged" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Event-fed feature store — ranking.signal ingest by type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(ranking_signals_total{region=~\"$region\"}[5m])) by (signal_type)", "legendFormat": "{{signal_type}}" }
+      ]
+    }
+  ]
+}

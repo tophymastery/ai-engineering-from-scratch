@@ -185,27 +185,46 @@ func main() {
 		log.Printf("catalog passthrough %sv1/merchants* -> %s (merchant-catalog)", bffPrefix, catalogBase)
 	}
 
-	// --- V-T4 search browse passthrough ---
-	// search-query serves the customer browse feed + geo search; the customer app
-	// reaches them through the BFF. Same discover-from-route-table pattern:
-	// /customer-bff/v1/customer/home and /customer-bff/v1/search route directly to
-	// the search slot (stable per-slot port survives the stub->real swap). Gated by
-	// search_v2 at the service. Documented in contracts/openapi/customer-bff.v1.yaml.
+	// --- V-T4 / V-T5 browse passthrough ---
+	// The customer browse feed + geo search are reached through the BFF. Same
+	// discover-from-route-table pattern (stable per-slot port survives the stub->real
+	// swap):
+	//   /customer-bff/v1/search         -> search-query (V-T4 geo search)
+	//   /customer-bff/v1/customer/home  -> ranking if present (V-T5 re-ranker),
+	//                                      else search-query (V-T4 static browse)
+	// D17 is two-phase: search RETRIEVES the top-500, ranking RE-RANKS to the top-50
+	// (ranking is a client of the search browse contract, fed via SEARCH_URL). When
+	// no ranking slot exists the feed falls back to the search browse feed unchanged.
 	searchBase := upstreamFor(routes, "/search/")
+	rankingBase := upstreamFor(routes, "/ranking/")
+	browseHomeBase := rankingBase
+	if browseHomeBase == "" {
+		browseHomeBase = searchBase
+	}
 	for _, bff := range bffsWithBrowsePassthrough {
 		bffPrefix := "/" + bff + "/"
-		if searchBase == "" || upstreamFor(routes, bffPrefix) == "" {
+		if upstreamFor(routes, bffPrefix) == "" {
 			continue
 		}
-		sURL, err := url.Parse(searchBase)
-		if err != nil {
-			log.Fatalf("bad search upstream %q: %v", searchBase, err)
+		if searchBase != "" {
+			sURL, err := url.Parse(searchBase)
+			if err != nil {
+				log.Fatalf("bad search upstream %q: %v", searchBase, err)
+			}
+			mux.Handle(bffPrefix+"v1/search", http.StripPrefix("/"+bff, httputil.NewSingleHostReverseProxy(sURL)))
 		}
-		sProxy := httputil.NewSingleHostReverseProxy(sURL)
-		strip := http.StripPrefix("/"+bff, sProxy)
-		mux.Handle(bffPrefix+"v1/customer/home", strip)
-		mux.Handle(bffPrefix+"v1/search", strip)
-		log.Printf("browse passthrough %sv1/customer/home + v1/search -> %s (search)", bffPrefix, searchBase)
+		if browseHomeBase != "" {
+			hURL, err := url.Parse(browseHomeBase)
+			if err != nil {
+				log.Fatalf("bad browse upstream %q: %v", browseHomeBase, err)
+			}
+			mux.Handle(bffPrefix+"v1/customer/home", http.StripPrefix("/"+bff, httputil.NewSingleHostReverseProxy(hURL)))
+		}
+		who := "search"
+		if rankingBase != "" {
+			who = "ranking (re-rank) -> search (retrieval)"
+		}
+		log.Printf("browse passthrough %sv1/customer/home -> %s [%s]; v1/search -> %s (search)", bffPrefix, browseHomeBase, who, searchBase)
 	}
 
 	flagSet := flags.FromEnv()

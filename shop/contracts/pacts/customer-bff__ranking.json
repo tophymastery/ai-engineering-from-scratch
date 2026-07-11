@@ -1,0 +1,36 @@
+{
+  "consumer": { "name": "customer-bff" },
+  "provider": { "name": "ranking" },
+  "metadata": {
+    "note": "V-T5 pact: the ranking re-rank contract (POST /v1/rank) served by the ranking service. File-based broker (see contracts/pacts/customer-bff__placeholder.json): registryctl pact-verify REPLAYS each interaction against the REAL ranking service booted by ci/pact-verify.sh (ranking_ml on). The interaction posts two candidates with DIFFERENT ratings and NO popularity features, so on a fresh feature store the ML score is rating-dominant and the higher-rated store ranks first — deterministic without any provider state. Pinned: results[0].store_id, scorer, count. Feature-derived re-orderings (popularity/CTR) are NOT pinned.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "re-rank a candidate set returns the top stores with a scorer label",
+      "request": {
+        "method": "POST",
+        "path": "/v1/rank",
+        "headers": { "Content-Type": "application/json" },
+        "body": {
+          "location": { "lat": 13.7563, "lng": 100.5018 },
+          "candidates": [
+            { "store_id": "mer_pact_hi", "name": "Pact HiRated", "rating": 4.8, "distance_m": 500, "open": true },
+            { "store_id": "mer_pact_lo", "name": "Pact LoRated", "rating": 4.2, "distance_m": 500, "open": true }
+          ],
+          "top_k": 50
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "results": [
+            { "store_id": "mer_pact_hi", "name": "Pact HiRated", "open": true }
+          ],
+          "scorer": "ml",
+          "count": 2
+        }
+      }
+    }
+  ]
+}

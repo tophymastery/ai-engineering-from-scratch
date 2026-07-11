@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/ranking.signal/v1.schema.json",
+  "title": "ranking.signal v1",
+  "description": "Retrieval-behaviour signal consumed by the ranking service (V-T5) to feed its online feature store (D17 two-phase ranking). Each event is an impression / click / order observation for a merchant that the ranking model turns into popularity + conversion (CTR) features used to re-rank the search top-500 -> top-50. Keyed by aggregate:merchant_id; at 100M scale merchant fan-out topics use SALTED keys `merchant_id#0..15` (D11) with PER-SALT ordering only. Signals are running-aggregate INCREMENTS (order does not matter across salts), so the consumer needs only EXACTLY-ONCE effect (libs/inbox) — a redelivered signal must never double-count. D30: additive-only within this topic. See contracts/events/README-per-salt-ordering.md.",
+  "x-topic": "ranking.signal",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "ranking.signal" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "merchant" },
+        "id": { "type": "string", "description": "mer_ token — the partition key (merchant_id); salted to merchant_id#0..15 for fan-out (D11)." },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["merchant_id", "signal_type"],
+      "properties": {
+        "merchant_id": { "type": "string", "description": "mer_ token the signal is about." },
+        "signal_type": { "type": "string", "enum": ["impression", "click", "order"], "description": "observed behaviour: impression (shown in a feed), click (opened), order (completed purchase)." },
+        "weight": { "type": "number", "description": "signal magnitude (default 1); e.g. an order's item count or a batched impression count." }
+      }
+    }
+  }
+}
