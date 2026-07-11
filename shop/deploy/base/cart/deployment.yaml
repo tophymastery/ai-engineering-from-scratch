@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart
+  labels:
+    app: cart
+    shop.io/team: marketplace
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cart
+  template:
+    metadata:
+      labels:
+        app: cart
+        shop.io/team: marketplace
+    spec:
+      containers:
+        - name: cart
+          image: shop/cart:latest
+          ports:
+            - containerPort: 8104
+          env:
+            - name: PORT
+              value: "8104"
+            - name: SERVICE_NAME
+              value: "cart"
+            - name: ENV
+              value: "prod"
+            - name: REGION
+              value: "bkk"
+            # cart_v1 ships dark (04 §1.3 / 03 §5). The staging/preview overlays
+            # flip it on; prod is enabled via a canary-gated rollout.
+            - name: FLAG_CART_V1
+              value: "false"
+            # Catalog origin for the add-time item-validation read (the
+            # cart->merchant-catalog pact). Stable per-slot service DNS.
+            - name: CATALOG_URL
+              value: "http://merchant-catalog:8102"
+            # Redis-snapshot freshness window = the "menu-change reflected < 5s"
+            # bound (01 §1 test criteria).
+            - name: CART_SNAPSHOT_TTL
+              value: "5s"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8104
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8104
+            initialDelaySeconds: 2
+            periodSeconds: 10

@@ -56,6 +56,14 @@ var bffsWithCatalogPassthrough = []string{"merchant-bff"}
 // contracts/openapi/customer-bff.v1.yaml + search.v1.yaml.
 var bffsWithBrowsePassthrough = []string{"customer-bff"}
 
+// bffsWithCartPassthrough are the BFF prefixes whose /v1/carts* paths the gateway
+// routes DIRECTLY to the cart slot (V-T7 — add/remove/get cart via customer-bff,
+// under ETag/If-Match). Same discover-from-route-table lifecycle as the
+// passthroughs above; the ETag/If-Match headers pass through the reverse proxy
+// untouched (02 §1 concurrency preserved). Documented in
+// contracts/openapi/customer-bff.v1.yaml.
+var bffsWithCartPassthrough = []string{"customer-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -250,6 +258,30 @@ func main() {
 		}
 		log.Printf("browse passthrough %sv1/customer/home -> %s [%s]; v1/customer/merchants/* -> %s; v1/search -> %s (search)",
 			bffPrefix, browseHomeBase, who, feedCacheBase, searchBase)
+	}
+
+	// --- V-T7 cart passthrough ---
+	// cart owns per-user carts; the customer app adds/removes/reads them through
+	// the BFF. Same discover-from-route-table pattern: /customer-bff/v1/carts*
+	// routes directly to the cart slot (stable per-slot port survives the
+	// stub->real swap). ETag/If-Match headers pass through the reverse proxy
+	// untouched (02 §1 concurrency preserved). Documented in
+	// contracts/openapi/customer-bff.v1.yaml.
+	cartBase := upstreamFor(routes, "/cart/")
+	for _, bff := range bffsWithCartPassthrough {
+		bffPrefix := "/" + bff + "/"
+		if cartBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		cartURL, err := url.Parse(cartBase)
+		if err != nil {
+			log.Fatalf("bad cart upstream %q: %v", cartBase, err)
+		}
+		cartProxy := httputil.NewSingleHostReverseProxy(cartURL)
+		strip := http.StripPrefix("/"+bff, cartProxy)
+		mux.Handle(bffPrefix+"v1/carts", strip)
+		mux.Handle(bffPrefix+"v1/carts/", strip)
+		log.Printf("cart passthrough %sv1/carts* -> %s (cart)", bffPrefix, cartBase)
 	}
 
 	flagSet := flags.FromEnv()

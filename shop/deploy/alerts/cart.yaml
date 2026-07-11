@@ -1,0 +1,60 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cart
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: marketplace
+    slice: V-T7
+    decisions: none
+spec:
+  groups:
+    # SLOs (V-T7):
+    #   - cart ops (add/remove/get) p99 < 100 ms
+    #   - menu-change revalidation reflected < 5 s
+    #   - stale writes are the intended 412 path, not an error — alert only if the
+    #     412 RATE spikes (a client stuck on a stale ETag / a hot-contention bug)
+    - name: cart.latency
+      rules:
+        - alert: CartOpsLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(cart_request_duration_seconds_bucket{route=~"/v1/carts.*"}[5m])) by (le, route)) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "cart ops p99 > 100ms ({{ $labels.route }})"
+            description: "Cart add/remove/get p99 latency budget (100ms) is burning. Check the Redis-snapshot hit rate + PG load / lock contention on the cart version CAS. Runbook: docs/runbooks/cart.md."
+
+    - name: cart.revalidation
+      rules:
+        - alert: CartRevalidationLagHigh
+          expr: histogram_quantile(0.99, sum(rate(cart_menu_revalidation_lag_seconds_bucket[5m])) by (le)) > 5
+          for: 5m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "cart menu-change revalidation lag p99 > 5s"
+            description: "menu.updated events are taking > 5s to be reflected in carts (stale prices / stale availability at checkout). Check the menu.updated consumer lag / the inbox. Runbook: docs/runbooks/cart.md."
+        - alert: CartSnapshotHitRateLow
+          expr: sum(rate(cart_snapshot_hits_total[5m])) / clamp_min(sum(rate(cart_snapshot_lookups_total[5m])), 1) < 0.8
+          for: 15m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "cart Redis-snapshot hit rate < 80%"
+            description: "Carts are rehydrating from PG more than expected (snapshot tier cold / evicting). Read latency will rise. Check Redis health / TTL config. Runbook: docs/runbooks/cart.md."
+
+    - name: cart.concurrency
+      rules:
+        - alert: CartStaleWriteRateHigh
+          expr: sum(rate(cart_requests_total{code="412"}[5m])) / clamp_min(sum(rate(cart_requests_total{method=~"POST|DELETE"}[5m])), 1) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "cart stale-write (412) ratio > 50% of edits"
+            description: "A high fraction of cart adds/removes are being rejected 412 (ETag mismatch). Expected under heavy concurrent editing of one cart, but a sustained spike suggests clients not refreshing ETags. Not data loss (the write is correctly rejected). Runbook: docs/runbooks/cart.md."

@@ -1,0 +1,67 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T7 cart slice. Panels bind to the metrics cart exports (also driving deploy/alerts/cart.yaml): cart-op latency (p99 < 100ms budget), menu-change revalidation lag (p99 < 5s budget), the Redis-snapshot hit/rehydrate mix, the 412 stale-write path, and RED per route. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Cart — Per-user carts, ETag concurrency & menu revalidation (V-T7)",
+  "uid": "cart-v-t7",
+  "tags": ["marketplace", "cart", "etag", "snapshot", "revalidation", "V-T7"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(cart_requests_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cart ops latency p99 (SLO < 100ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.075 }, { "color": "red", "value": 0.1 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(cart_request_duration_seconds_bucket{route=~\"/v1/carts.*\",region=~\"$region\"}[5m])) by (le, route))", "legendFormat": "{{route}} p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Menu-change revalidation lag p99 (SLO < 5s) — menu.updated → reflected",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 5 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(cart_menu_revalidation_lag_seconds_bucket{region=~\"$region\"}[5m])) by (le))", "legendFormat": "revalidation lag p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Redis-snapshot tier — hits vs PG rehydrates",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(cart_snapshot_hits_total{region=~\"$region\"}[5m]))", "legendFormat": "snapshot hits/s" },
+        { "expr": "sum(rate(cart_snapshot_rehydrates_total{region=~\"$region\"}[5m]))", "legendFormat": "PG rehydrates/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Optimistic concurrency — accepted edits vs 412 stale writes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(cart_requests_total{method=~\"POST|DELETE\",code=~\"2..\",region=~\"$region\"}[5m]))", "legendFormat": "accepted edits/s" },
+        { "expr": "sum(rate(cart_requests_total{code=\"412\",region=~\"$region\"}[5m]))", "legendFormat": "412 stale writes/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cart API outcome rate (RED per route)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(cart_requests_total{region=~\"$region\"}[5m])) by (route, code)", "legendFormat": "{{route}} {{code}}" }
+      ]
+    }
+  ]
+}

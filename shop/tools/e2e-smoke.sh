@@ -431,6 +431,91 @@ else
   if [ "$MOF" = 1 ]; then pass "merchant page: >20 reads collapsed to EXACTLY 1 catalog origin fetch (two-tier + singleflight)"; else bad "merchant origin_fetches=$MOF, want 1 (${STATS:0:200})"; fi
 fi
 
+# --- 17. V-T7 cart (ETag/If-Match → 412 + menu-change revalidation) — GATED on
+# the cart AND merchant-catalog slots being REAL (cart validates + prices line
+# items against the real catalog; the stub can't). Demoed THROUGH the customer-bff
+# passthrough (gateway routes /customer-bff/v1/carts* -> cart). Proves: add→get
+# cart with a strong ETag, a stale-write 412, missing-If-Match 428, and a
+# menu-change → revalidation-reflected assertion (publish a menu.updated to cart
+# and time until the cart's subtotal reflects the new price; budget < 5s). ---
+echo "== V-T7 cart (add->get ETag -> STALE WRITE 412 -> menu-change revalidation reflected <5s, via customer-bff) =="
+CART_MODE="$(awk -F'\t' '$1=="cart"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+CATALOG_MODE_CART="$(awk -F'\t' '$1=="merchant-catalog"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$CART_MODE" != "real" ] || [ "$CATALOG_MODE_CART" != "real" ]; then
+  echo "  SKIP: cart='$CART_MODE' merchant-catalog='$CATALOG_MODE_CART' — cart section runs only when BOTH cart and merchant-catalog are the real slots"
+else
+  # Seed a merchant + one priced item in the catalog (via merchant-bff), so cart
+  # can validate + price the line at add time (the cart->merchant-catalog pact).
+  VCMID="mer_e2e_cart_$$"
+  curl -s -o /dev/null -X POST "$GW/merchant-bff/v1/merchants" -H 'Content-Type: application/json' \
+    -d '{"merchant_id":"'"$VCMID"'","name":"E2E Cart Kitchen"}'
+  CMENU_ETAG="$(curl -s -D - -o /dev/null --max-time 8 "$GW/merchant-bff/v1/merchants/$VCMID/menu" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  ADD_RESP="$(curl -s --max-time 8 -X PATCH "$GW/merchant-bff/v1/merchants/$VCMID/menu" -H 'Content-Type: application/json' -H "If-Match: $CMENU_ETAG" \
+    -d '{"upsert_items":[{"name":"Som Tam","price":{"amount":8000,"currency":"THB"},"available":true}]}' 2>/dev/null)"
+  VIID="$(printf '%s' "$ADD_RESP" | sed -n 's/.*"item_id":"\([^"]*\)".*/\1/p')"
+  if [ -n "$VIID" ]; then pass "seeded catalog item for cart ($VIID @ 8000 THB)"; else bad "failed to seed catalog item (${ADD_RESP:0:160})"; fi
+
+  # Add the item to a cart via customer-bff → 200, subtotal 2×8000, strong ETag.
+  VCART="crt_e2e_$$"
+  ADDBODY='{"item_id":"'"$VIID"'","merchant_id":"'"$VCMID"'","quantity":2}'
+  CA="$(curl -s -D - --max-time 8 -X POST "$GW/customer-bff/v1/carts/$VCART/items" -H 'Content-Type: application/json' -d "$ADDBODY" 2>/dev/null)"
+  CE1="$(printf '%s' "$CA" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  if [[ "$CA" == *'"subtotal":{"amount":16000'* ]] && [ -n "$CE1" ]; then pass "cart add via customer-bff: subtotal 16000, strong ETag ($CE1)"; else bad "cart add failed (etag=$CE1 body=${CA:0:200})"; fi
+
+  # GET the cart → same ETag (reads return an ETag).
+  CG_ETAG="$(curl -s -D - -o /dev/null --max-time 8 "$GW/customer-bff/v1/carts/$VCART" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  if [ "$CG_ETAG" = "$CE1" ]; then pass "GET cart returns the current ETag ($CG_ETAG)"; else bad "GET cart ETag=$CG_ETAG want $CE1"; fi
+
+  # A second add with the fresh If-Match → 200 + a NEW ETag (quantity accrues).
+  CA2="$(curl -s -D - --max-time 8 -X POST "$GW/customer-bff/v1/carts/$VCART/items" -H 'Content-Type: application/json' -H "If-Match: $CE1" -d "$ADDBODY" 2>/dev/null)"
+  CE2="$(printf '%s' "$CA2" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  if [ -n "$CE2" ] && [ "$CE2" != "$CE1" ]; then pass "second cart add minted a NEW ETag ($CE2)"; else bad "second add ETag old=$CE1 new=$CE2"; fi
+
+  # HEADLINE: replay the STALE (original) ETag → 412 STALE_WRITE.
+  SC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/customer-bff/v1/carts/$VCART/items" -H 'Content-Type: application/json' -H "If-Match: $CE1" -d "$ADDBODY" 2>/dev/null)"
+  if [ "$SC" = 412 ]; then pass "cart STALE WRITE rejected with 412 (ETag mismatch, 02 §1)"; else bad "stale cart write -> $SC (want 412)"; fi
+  SB="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/carts/$VCART/items" -H 'Content-Type: application/json' -H "If-Match: $CE1" -d "$ADDBODY" 2>/dev/null)"
+  if [[ "$SB" == *'STALE_WRITE'* ]]; then pass "412 envelope carries STALE_WRITE code (02 §2)"; else bad "412 body missing STALE_WRITE (${SB:0:160})"; fi
+
+  # Missing If-Match on an existing cart → 428 IF_MATCH_REQUIRED.
+  NC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/customer-bff/v1/carts/$VCART/items" -H 'Content-Type: application/json' -d "$ADDBODY" 2>/dev/null)"
+  if [ "$NC" = 428 ]; then pass "cart add without If-Match rejected (428)"; else bad "no If-Match cart add -> $NC (want 428)"; fi
+
+  # MENU-CHANGE REVALIDATION reflected < 5s: use a fresh cart (subtotal 16000 at
+  # 8000), then publish a menu.updated raising the price to 9000; time how long
+  # until the cart reflects it (subtotal 18000). Budget: < 5s (01 §1 criteria).
+  RCART="crt_e2e_reval_$$"
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/customer-bff/v1/carts/$RCART/items" -H 'Content-Type: application/json' -d "$ADDBODY"
+  RNOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  MENV='{"event_id":"evt_e2e_cartreval_'"$$"'","event_type":"menu.updated","occurred_at":"'"$RNOW"'","trace_id":"t_e2e","aggregate":{"type":"merchant","id":"'"$VCMID"'","region":"bkk"},"schema_version":1,"payload":{"merchant_id":"'"$VCMID"'","version":999,"menu_etag":"\"reval\"","items":[{"item_id":"'"$VIID"'","name":"Som Tam","amount":9000,"currency":"THB","available":true}]}}'
+  assert_status "publish menu.updated to cart" POST "/cart/v1/menu-events" 202 "$MENV"
+  t0="$(date +%s%3N 2>/dev/null || date +%s)"; reflected=0; lag_ms=0
+  for _ in $(seq 1 100); do
+    body="$(curl -s --max-time 5 "$GW/customer-bff/v1/carts/$RCART" 2>/dev/null)"
+    if [[ "$body" == *'"subtotal":{"amount":18000'* ]]; then
+      t1="$(date +%s%3N 2>/dev/null || date +%s)"; lag_ms=$((t1 - t0)); reflected=1; break
+    fi
+    sleep 0.05
+  done
+  if [ "$reflected" = 1 ] && [ "$lag_ms" -lt 5000 ]; then
+    pass "menu-change revalidation reflected in cart ${lag_ms}ms (subtotal 16000 -> 18000, < 5s budget)"
+  else
+    bad "cart did not reflect the menu change within 5s (revalidation FAILED)"
+  fi
+
+  # A merchant marking the item unavailable drops it OUT of the subtotal.
+  UNOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  UENV='{"event_id":"evt_e2e_cartunavail_'"$$"'","event_type":"menu.updated","occurred_at":"'"$UNOW"'","trace_id":"t_e2e","aggregate":{"type":"merchant","id":"'"$VCMID"'","region":"bkk"},"schema_version":1,"payload":{"merchant_id":"'"$VCMID"'","version":1000,"menu_etag":"\"unavail\"","items":[{"item_id":"'"$VIID"'","name":"Som Tam","amount":9000,"currency":"THB","available":false}]}}'
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/cart/v1/menu-events" -H 'Content-Type: application/json' -d "$UENV"
+  uflag=0
+  for _ in $(seq 1 100); do
+    body="$(curl -s --max-time 5 "$GW/customer-bff/v1/carts/$RCART" 2>/dev/null)"
+    if [[ "$body" == *'"subtotal":{"amount":0'* ]] && [[ "$body" == *'"available":false'* ]]; then uflag=1; break; fi
+    sleep 0.05
+  done
+  if [ "$uflag" = 1 ]; then pass "item-unavailable menu change flags the cart line + drops it from subtotal"; else bad "cart did not flag the item unavailable within 5s"; fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"
