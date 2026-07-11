@@ -1,0 +1,87 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T4 Search & browse slice (D17 + D11). Panels bind to the metrics search exports (also driving deploy/alerts/search.yaml): query latency (p99 < 150ms), freshness lag (p99 < 30s), geo shard fan-out (>=99% <= 2 shards), salted-partition balance (< 2x mean), rating-debounce effectiveness, and ingest backpressure. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Search & Browse — Geo Routing, Freshness & Flood Control (V-T4)",
+  "uid": "search-v-t4",
+  "tags": ["discovery", "search", "browse", "h3", "opensearch", "D17", "D11", "V-T4"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(search_query_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Query latency p99 (SLO < 150ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.15 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(search_query_duration_seconds_bucket{route=~\"/v1/(search|customer/home)\",region=~\"$region\"}[5m])) by (le, route))", "legendFormat": "{{route}} p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Freshness lag p99 (SLO < 30s) — event -> queryable",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 30 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(search_freshness_lag_seconds_bucket{region=~\"$region\"}[5m])) by (le))", "legendFormat": "freshness p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Geo shard fan-out — fraction of queries touching <= 2 shards (SLO >= 99%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0.9, "max": 1 } },
+      "targets": [
+        { "expr": "sum(rate(search_geo_queries_shards_touched_total{buckets=~\"1|2\",region=~\"$region\"}[10m])) / sum(rate(search_geo_queries_total{region=~\"$region\"}[10m]))", "legendFormat": "<= 2 shards" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Salted merchant partitions — hottest / mean (target < 2x)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2 } ] } } },
+      "targets": [
+        { "expr": "max(search_salt_partition_docs{region=~\"$region\"}) / avg(search_salt_partition_docs{region=~\"$region\"})", "legendFormat": "hottest/mean" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Rating debounce — index writes / rating events (D17: coalesced)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "targets": [
+        { "expr": "sum(rate(search_rating_index_writes_total{region=~\"$region\"}[5m])) / sum(rate(search_rating_events_total{region=~\"$region\"}[5m]))", "legendFormat": "write ratio" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Ingest backpressure — queue depth (bulk reindex)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "max(search_ingest_queue_depth{region=~\"$region\"})", "legendFormat": "queue depth" },
+        { "expr": "sum(rate(search_docs_indexed_total{region=~\"$region\"}[5m]))", "legendFormat": "docs/s" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Browse feed QPS (customer-bff /v1/customer/home)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(search_query_total{route=\"/v1/customer/home\",region=~\"$region\"}[5m]))", "legendFormat": "browse QPS" },
+        { "expr": "sum(rate(search_query_total{route=\"/v1/search\",region=~\"$region\"}[5m]))", "legendFormat": "geo search QPS" }
+      ]
+    }
+  ]
+}

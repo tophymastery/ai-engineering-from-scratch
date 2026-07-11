@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/rating.updated/v1.schema.json",
+  "title": "rating.updated v1",
+  "description": "Emitted by the rating service (V-T17) whenever a merchant's rating aggregate changes. Keyed by aggregate:merchant_id — at 100M scale (D11) merchant fan-out topics use SALTED keys `merchant_id#0..15`, so a celebrity/chain merchant's rating stream spreads across 16 partitions with PER-SALT ordering only; consumers (search) MUST be last-write-wins by `version`. Consumers: search — updates the store's rating in the discovery index, DEBOUNCED to <=1 index write / merchant / 5 min (D17). D30: additive-only within this topic. See contracts/events/README-per-salt-ordering.md for the salted-partition ordering contract.",
+  "x-topic": "rating.updated",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "rating.updated" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "merchant" },
+        "id": { "type": "string", "description": "mer_ token — the partition key (merchant_id); salted to merchant_id#0..15 for fan-out (D11)." },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["merchant_id", "rating", "rating_count", "version"],
+      "properties": {
+        "merchant_id": { "type": "string", "description": "mer_ token." },
+        "rating": { "type": "number", "description": "the new average rating (e.g. 4.6)." },
+        "rating_count": { "type": "integer", "description": "number of ratings in the aggregate." },
+        "version": { "type": "integer", "description": "monotonic aggregate version; consumers apply last-write-wins per salt." }
+      }
+    }
+  }
+}

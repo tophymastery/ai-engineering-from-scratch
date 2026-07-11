@@ -1,0 +1,54 @@
+{
+  "consumer": { "name": "customer-bff" },
+  "provider": { "name": "search" },
+  "metadata": {
+    "note": "V-T4 pact: the customer-bff browse endpoint (GET /v1/customer/home, 02 §4.2) and geo search are served by the search-query service. File-based broker (see contracts/pacts/customer-bff__placeholder.json): registryctl pact-verify REPLAYS each interaction against the REAL search-query booted by ci/pact-verify.sh (search_v2 on), asserting status + response shape. ci/pact-verify.sh pre-seeds a fixed store mer_01hpactsearch000000000000 at 13.7563,100.5018 via POST /v1/index/merchants (provider state). Non-deterministic/geo-derived fields (distance_m, eta_minutes, delivery_fee.amount) are NOT pinned; stable scalars (store_id, name, rating, open, currency) are.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "browse feed near a point returns nearby open stores with fee + rating",
+      "request": {
+        "method": "GET",
+        "path": "/v1/customer/home?lat=13.7563&lng=100.5018"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "location": { "lat": 13.7563, "lng": 100.5018 },
+          "feed": [
+            {
+              "store_id": "mer_01hpactsearch000000000000",
+              "name": "Pact Som Tam",
+              "rating": 4.7,
+              "open": true,
+              "delivery_fee": { "currency": "THB" }
+            }
+          ],
+          "next_cursor": null
+        }
+      }
+    },
+    {
+      "description": "geo search for a dish returns the matching store",
+      "request": {
+        "method": "GET",
+        "path": "/v1/search?lat=13.7563&lng=100.5018&q=som%20tam"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "results": [
+            {
+              "store_id": "mer_01hpactsearch000000000000",
+              "name": "Pact Som Tam",
+              "rating": 4.7,
+              "open": true
+            }
+          ],
+          "next_cursor": null
+        }
+      }
+    }
+  ]
+}

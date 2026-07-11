@@ -16,8 +16,8 @@ FAKES := payment-sim map-sim notify-sink
 
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
-        contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog \
-        e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search \
+        test-search-perf e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -35,6 +35,8 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/identity-auth && $(GO) build ./...
 	@cd services/identity-profile && $(GO) build ./...
 	@cd services/merchant-catalog && $(GO) build ./...
+	@cd services/search-indexer && $(GO) build ./...
+	@cd services/search-query && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -109,6 +111,11 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@cd services/merchant-catalog && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@echo "== V-T3 perf criteria (no -race; race instrumentation invalidates latency): menu-CRUD p99<200ms + event-lag p99<2s =="
 	@cd services/merchant-catalog && $(GO) test -count=1 -run TestPerf ./...
+	@echo "== V-T4 search & browse (D17/D11, -race): H3-res-5 <=2-shard routing + salt balance + rating debounce + freshness + LWW + lock-free reads + schema-valid =="
+	@cd services/search-indexer && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@cd services/search-query && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T4 perf criteria (no -race): query p99<150ms + 30k-QPS burst + 150k-reindex feed-p99 stability =="
+	@$(MAKE) --no-print-directory test-search-perf
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -194,6 +201,20 @@ render-catalog: ## V-T3: render the merchant-catalog base (Deployment+Service) +
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/catalog.yaml && $(GO) run . $$root/deploy/dashboards/catalog.json ); \
 	  echo "render-catalog: merchant-catalog base (Deployment+Service) + alerts + dashboard rendered/parsed"
+
+test-search-perf: ## V-T4: search perf criteria (no -race): query p99<150ms + 30k-QPS burst + 150k-reindex feed-p99 stability
+	@cd services/search-indexer && $(GO) test -count=1 -run TestPerf ./index/
+
+render-search: ## V-T4/D17: render the search base (search-query+search-indexer Deployments/Services + per-cell OpenSearch data/ingest StatefulSets) + lint the search alerts/dashboard
+	@set -e; root=$$PWD; f=$$root/.render-search.yaml; \
+	  $(KUSTOMIZE) build deploy/base/search > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: search-query' $$f || { echo "render-search: search-query Deployment missing from render"; exit 1; }; \
+	  grep -q 'name: search-indexer' $$f || { echo "render-search: search-indexer Deployment missing from render"; exit 1; }; \
+	  grep -q 'name: search-opensearch-ingest' $$f || { echo "render-search: dedicated OpenSearch ingest nodes missing from render (D17)"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/search.yaml && $(GO) run . $$root/deploy/dashboards/search.json ); \
+	  echo "render-search: search base (search-query+search-indexer + OpenSearch data/ingest topology) + alerts + dashboard rendered/parsed"
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
 	@ci/backdoor-scan.sh

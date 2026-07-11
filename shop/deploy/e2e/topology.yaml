@@ -30,7 +30,10 @@ services:
   # (tools/merchant-catalog-realcmd.sh, catalog_v1 on). `make e2e-sync` promotes
   # it stub->real once the binary builds.
   - { name: merchant-catalog,  port: 8102, mode: stub, contract: contracts/openapi/merchant-catalog.v1.yaml,  real_cmd: "bash tools/merchant-catalog-realcmd.sh" }
-  - { name: search,            port: 8103, mode: stub, contract: contracts/openapi/search.v1.yaml,            real_cmd: "" }
+  # search is the V-T4 slice: real_cmd boots the built search-query binary
+  # (tools/search-realcmd.sh, search_v2 on; embeds the indexer). `make e2e-sync`
+  # promotes it stub->real once the binary builds.
+  - { name: search,            port: 8103, mode: stub, contract: contracts/openapi/search.v1.yaml,            real_cmd: "bash tools/search-realcmd.sh" }
   - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "" }
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }

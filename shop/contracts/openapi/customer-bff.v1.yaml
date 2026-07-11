@@ -13,6 +13,12 @@ paths:
     get:
       operationId: get_home
       summary: One payload — stores (search) + fees (pricing) + ratings.
+      description: >
+        Browse feed (02 §4.2). V-T4: today the GATEWAY routes
+        /customer-bff/v1/customer/home + /v1/search DIRECTLY to the search-query
+        slot (behind search_v2), same discover-from-route-table lifecycle as the
+        auth/profile/catalog passthroughs; a real customer-bff slice will front
+        the aggregation later (additive-only, D30). See contracts/openapi/search.v1.yaml.
       parameters:
         - name: lat
           in: query

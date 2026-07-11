@@ -49,6 +49,13 @@ var bffsWithProfilePassthrough = []string{"customer-bff"}
 // contracts/openapi/merchant-bff.v1.yaml.
 var bffsWithCatalogPassthrough = []string{"merchant-bff"}
 
+// bffsWithBrowsePassthrough are the BFF prefixes whose browse + geo-search paths
+// the gateway routes DIRECTLY to the search-query slot (V-T4 — GET
+// /v1/customer/home + /v1/search via customer-bff, behind search_v2). Same
+// discover-from-route-table lifecycle; documented in
+// contracts/openapi/customer-bff.v1.yaml + search.v1.yaml.
+var bffsWithBrowsePassthrough = []string{"customer-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -176,6 +183,29 @@ func main() {
 		mux.Handle(bffPrefix+"v1/merchants", strip)
 		mux.Handle(bffPrefix+"v1/merchants/", strip)
 		log.Printf("catalog passthrough %sv1/merchants* -> %s (merchant-catalog)", bffPrefix, catalogBase)
+	}
+
+	// --- V-T4 search browse passthrough ---
+	// search-query serves the customer browse feed + geo search; the customer app
+	// reaches them through the BFF. Same discover-from-route-table pattern:
+	// /customer-bff/v1/customer/home and /customer-bff/v1/search route directly to
+	// the search slot (stable per-slot port survives the stub->real swap). Gated by
+	// search_v2 at the service. Documented in contracts/openapi/customer-bff.v1.yaml.
+	searchBase := upstreamFor(routes, "/search/")
+	for _, bff := range bffsWithBrowsePassthrough {
+		bffPrefix := "/" + bff + "/"
+		if searchBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		sURL, err := url.Parse(searchBase)
+		if err != nil {
+			log.Fatalf("bad search upstream %q: %v", searchBase, err)
+		}
+		sProxy := httputil.NewSingleHostReverseProxy(sURL)
+		strip := http.StripPrefix("/"+bff, sProxy)
+		mux.Handle(bffPrefix+"v1/customer/home", strip)
+		mux.Handle(bffPrefix+"v1/search", strip)
+		log.Printf("browse passthrough %sv1/customer/home + v1/search -> %s (search)", bffPrefix, searchBase)
 	}
 
 	flagSet := flags.FromEnv()
