@@ -42,9 +42,10 @@ make preview PR=777
 step "[9/12] security scan (govulncheck / offline dependency lint)"
 make security-scan
 
-step "[10/12] render kustomize overlays (4/4) + preview-shared/gitops manifests"
+step "[10/12] render kustomize overlays (4/4) + preview-shared/gitops manifests + event-backbone (S-T6)"
 make render
 make render-preview
+make render-events
 
 step "[11/12] boot + smoke"
 make up

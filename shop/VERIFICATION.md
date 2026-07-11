@@ -1,4 +1,4 @@
-# Verification (S-T1, S-T2)
+# Verification (S-T1–S-T6)
 
 How each Definition-of-Done item and test criterion was verified **in this
 environment**, and where the environment forced an adaptation. Legend:
@@ -419,3 +419,118 @@ cd tools/stubgen && go run . -spec ../../contracts/openapi/order.v1.yaml -port 9
 4. **stubgen synthesises from `example` or schema** — `examples` (plural) and
    content types other than `application/json` are ignored; the 02 conventions
    make JSON the only BFF/service content type.
+
+---
+
+# S-T6 Verification (D8 + D22: event backbone — CDC outbox, partitioned inbox, DLQ + replay)
+
+Three new libs — `libs/eventbus` (broker abstraction + in-process Kafka
+stand-in), `libs/outbox` (transactional outbox + log-based CDC relay),
+`libs/inbox` (exactly-once inbox + per-group SQL DLQ) — plus the reference
+sandbox service + criteria tests in `libs/eventbus/example`, the
+`tools/dlqctl` park/inspect/replay CLI, and deploy templates
+(`deploy/cdc/debezium-connector.json`, `deploy/alerts/event-backbone.yaml`).
+All Go, dependency-light (stdlib; `modernc.org/sqlite` as a **test-only** engine,
+already vendored by `libs/idempotency`). The event core is pure-stdlib so the
+soak and correctness tests run under `-race`.
+
+## Environment realities
+
+- **No Kafka.** `MemBroker` is the in-process stand-in for the per-cell Kafka
+  cluster (D5): fixed partitions, append-only per-partition logs, per-group
+  cursors, ordered-per-key, at-least-once, retry-then-park. The `Broker`
+  interface is Kafka-shaped so a `KafkaBroker` drops in unchanged.
+- **No Debezium / PG WAL.** The relay is the `CDCTailRelay`: it tails the
+  append-only outbox by monotonic `id` with a durable cursor — the sqlite/mem
+  equivalent of a WAL position. `deploy/cdc/debezium-connector.json` is the
+  production template (PG WAL → outbox EventRouter SMT → Kafka). **No poller**:
+  the tail is an indexed `WHERE id > $cursor` range scan on an append-only
+  table with a tiny cursor row — never the banned `published=false` full scan +
+  per-row UPDATE (which causes the vacuum storms D8 forbids).
+- **PG native partitioning is in the migrations** (`0001_outbox.pg.sql`,
+  `0001_inbox.pg.sql`: `PARTITION BY RANGE (part_day)` + `DROP TABLE` cleanup).
+  SQLite has no native partitioning, so tests model a partition as a `part_day`
+  column and "drop partition" as a guarded `DELETE`-by-day. **render-only** for
+  the DDL; the loss-free semantics are tested for real.
+- **2-hour soak is not feasible here** — `go test` runs a **default 8 s** soak
+  (env `SOAK_SECONDS`); a **60 s** run was executed for the recorded numbers
+  below. Both sustain ≥10k events/s and hold lag p99 < 2 s throughout. The
+  duration is the only thing scaled down; rate, lag SLO, partition-drop and the
+  exactly-once audit are asserted for real.
+
+## DoD / test-criteria matrix
+
+| # | S-T6 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | Outbox/inbox/DLQ libs merged | **full** | `libs/outbox` (`WriteInTx` in caller's tx, `CDCTailRelay`, partition-drop), `libs/inbox` (`Process` exactly-once, `SQLDLQ`), `libs/eventbus` (broker + `DLQSink`). `go test -race ./...` green in all three (wired into `make test-libs`). |
+| DoD-1 | Debezium connector template in `deploy/` | **full (lint-verified)** | `deploy/cdc/debezium-connector.json` — PG connector + `EventRouter` SMT routing outbox rows to the topic in the `topic` column, keyed by `agg_key` (D5), `exactly.once.support=required`. Parses via `yamlcheck` in `make render-events`. |
+| DoD-2 | Replay CLI in `tools/` with runbook | **full** | `tools/dlqctl` (`list`/`inspect`/`replay`/`depth`/`seed`) + `RUNBOOK.md`. `make dlqctl-demo` runs seed→list→inspect→replay live; `go test` in the module asserts the durable handoff (parked→replayed + re-emitted into outbox). |
+| DoD-2 | relay-lag + DLQ-depth alerts templated | **full (lint-verified)** | `deploy/alerts/event-backbone.yaml` PrometheusRule: relay-lag p99 (warn 1.5 s / crit 2 s), relay-stalled, DLQ-depth (warn >0 / crit >100), DLQ-park-rate. Parses via `yamlcheck` in `make render-events`. |
+| DoD-3 | Reference svc publishes/consumes through full path | **full** | `libs/eventbus/example` (`go run .`): 200 orders written **business row + outbox row in one tx** → CDC relay → bus → inbox exactly-once projection. Audit orders=200 published=200 consumed=200 projection=200, lag p99 ~19 ms. |
+| Test | Soak ≥10k events/s, relay lag p99 < 2 s, partition drop mid-soak with zero loss (offset/count audit) | **full (duration adapted)** | `TestSoak`. **60 s run: 1,200,000 events, sustained 20,000/s, lag p99 386 ms, p999 544 ms, max 579 ms (all < 2 s); 1,197,000 partition drops DURING the soak; published==consumed==produced==1,200,000 exactly-once, outbox stayed flat at 3,000 rows.** 8 s CI run: 160,000 events, 19,997/s, p99 1.25 ms, 156,040 drops. The drop guard refuses to drop anything past the relay cursor ⇒ zero event loss. |
+| Test | 10× duplicate-delivery burst ⇒ zero duplicate side effects | **full** | `TestDuplicateDeliveryBurst`: 300 events redelivered onto the bus 10× extra (3,300 deliveries) through the **SQL inbox** ⇒ 300 unique effects, projection rows=300, applied=300. Plus `TestExactlyOnceEffect`/`TestConcurrentDuplicateBurst` in `libs/inbox` (10 concurrent same-event ⇒ exactly 1 effect). |
+| Test | Poison parks without blocking (lag recovers < 60 s), replay converges exactly-once | **full** | `TestPoisonParkAndReplay` (1 partition = strict head-of-line): poison parks after **3** attempts; **200 following events keep flowing, recovery 63 ms (< 60 s)**; DLQ depth=1; then handler "fixed" + `dlq.Replay` (re-emit via outbox) ⇒ projection=201 exactly-once, DLQ depth=0; re-replay is a no-op. |
+| Skip-inbox rule (D8) | naturally-idempotent handlers opt out with a code marker | **full** | `ProcessIdempotent` + `NaturallyIdempotent` marker; `TestSkipInboxRule`: 3 deliveries → 3 handler calls, **0 inbox rows**. |
+| Inbox 7-day retention | partition-drop cleanup | **full** | `DropInboxOlderThanRetention` (`InboxRetention = 7d`); `TestInboxRetentionDrop`: a 10-day-old row dropped, fresh row kept. |
+
+## Measured numbers
+
+| Metric | 60 s soak | 8 s CI soak | Threshold |
+|---|---|---|---|
+| Sustained rate | **20,000 events/s** | 19,997 events/s | ≥ 10,000/s |
+| Total events | 1,200,000 | 160,000 | — |
+| Relay lag p99 | **386.8 ms** | 1.25 ms | < 2 s |
+| Relay lag p999 / max | 544 ms / 579 ms | 3.5 ms / 8.2 ms | < 2 s |
+| Partition drops during soak | **1,197,000** | 156,040 | > 0, loss-free |
+| Exactly-once audit (pub==cons==prod) | 1,200,000 == all | 160,000 == all | equal |
+| Poison recovery (following events flow) | — | **63 ms** | < 60 s |
+| Dedupe: deliveries → effects | — | **3,300 → 300** | 0 duplicates |
+
+## Pipeline integration (no regression)
+
+- New libs wired into `make test-libs`: `eventbus` + `outbox` core run under
+  **`-race`**, `inbox` runs, then the `example` criteria trio + the `dlqctl`
+  CLI test. `make build` now also compiles `tools/dlqctl` + the example.
+- `ci/run-local.sh` **FULL 12-stage pipeline exit 0**. Stage `[1/12] make test`
+  now includes the S-T6 suites; stage `[10/12]` gained `make render-events`
+  (Debezium connector + alert templates lint). All S-T1..S-T5 stages unchanged
+  and green. `LIBS` grew to include `eventbus outbox inbox`.
+
+## Commands to reproduce
+
+```
+cd libs/eventbus && go test -race ./...
+cd libs/outbox   && go test -race ./...
+cd libs/inbox    && go test ./...
+cd libs/eventbus/example && go test -count=1 ./...          # soak + dedupe + poison
+cd libs/eventbus/example && SOAK_SECONDS=60 go test -run TestSoak -v ./...
+cd libs/eventbus/example && go run .                        # live reference svc
+make dlqctl-demo                                            # park/inspect/replay CLI
+make render-events                                          # connector + alerts lint
+make test-libs                                             # all libs incl. S-T6
+./ci/run-local.sh                                          # full 12-stage pipeline (exit 0)
+```
+
+## Deviations summary (S-T6)
+
+1. **Kafka → `MemBroker`, Debezium → `CDCTailRelay`.** Both are in-process
+   stand-ins behind the production interfaces (`Broker`, `Relay`); the Kafka
+   connector + WAL wiring ship as `deploy/cdc/debezium-connector.json`. The
+   append-only-log + durable-cursor shape is preserved so the swap is mechanical.
+2. **PG native partitioning is render-only; SQLite models it with a `part_day`
+   column.** The DDL (`PARTITION BY RANGE` + `DROP TABLE`) is in the migrations;
+   the **loss-free drop semantics** (guard refuses to drop past the relay
+   cursor) are tested for real, continuously, during the soak.
+3. **Soak duration 8 s (CI) / 60 s (recorded), not 2 h** — infeasible in this
+   sandbox. Rate (≥10k/s), lag SLO (p99 < 2 s), partition-drop-mid-soak and the
+   exactly-once offset/count audit are all asserted at real scale; only wall-
+   clock is shortened. "Zero autovacuum alerts" is inherent to the design (no
+   UPDATE churn, partition-drop cleanup) rather than a measured PG metric here.
+4. **High-rate soak uses the mem outbox + mem inbox** (`MemStore`,
+   `MemProcessor`) so the backbone — not a single-writer SQLite file — is the
+   thing under load. The **SQL** transactional outbox and **SQL** exactly-once
+   inbox + DLQ are exercised for real by the reference service, the dedupe burst
+   (SQL inbox), the poison test (SQL DLQ) and the dlqctl CLI.
+5. **`dlqctl` drives a SQLite file** (`-db`) instead of a cell PG; `replay`
+   re-inserts into the outbox in that DB so the running relay reprocesses it —
+   the same code path production uses, minus the server.

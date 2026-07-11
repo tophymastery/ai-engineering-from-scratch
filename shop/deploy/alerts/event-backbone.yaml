@@ -1,0 +1,80 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: event-backbone
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: data-platform
+    decisions: D8-D22
+spec:
+  groups:
+    - name: event-backbone.relay
+      rules:
+        # Relay lag = time from outbox row commit to bus publish. S-T6 criterion:
+        # p99 < 2s. Debezium exposes MilliSecondsBehindSource; the CDCTailRelay
+        # exposes relay_publish_lag_seconds. Alert well below the SLO so there is
+        # headroom before the criterion is breached.
+        - alert: EventBackboneRelayLagHigh
+          expr: histogram_quantile(0.99, sum(rate(relay_publish_lag_seconds_bucket[5m])) by (le, cell, relay)) > 1.5
+          for: 5m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "Relay lag p99 high ({{ $labels.cell }}/{{ $labels.relay }})"
+            description: "CDC relay p99 lag > 1.5s for 5m (SLO 2s). Check Debezium slot, Kafka health, consumer throughput. Runbook: tools/dlqctl/RUNBOOK.md."
+
+        - alert: EventBackboneRelayLagCritical
+          expr: histogram_quantile(0.99, sum(rate(relay_publish_lag_seconds_bucket[5m])) by (le, cell, relay)) > 2
+          for: 2m
+          labels:
+            severity: critical
+            team: data-platform
+          annotations:
+            summary: "Relay lag p99 breached SLO ({{ $labels.cell }}/{{ $labels.relay }})"
+            description: "CDC relay p99 lag > 2s — the S-T6 SLO is breached. Money-path events (order/payment) are delayed."
+
+        - alert: EventBackboneRelayStalled
+          expr: (time() - relay_cursor_advanced_timestamp_seconds) > 60
+          for: 1m
+          labels:
+            severity: critical
+            team: data-platform
+          annotations:
+            summary: "Relay cursor not advancing ({{ $labels.cell }}/{{ $labels.relay }})"
+            description: "The relay durable cursor has not advanced in 60s while the outbox has unpublished rows — the relay is stalled."
+
+    - name: event-backbone.dlq
+      rules:
+        # DLQ depth = parked events awaiting operator replay (D22). Parking does
+        # NOT block the partition, so this is a correctness backlog, not a
+        # latency page. Any sustained depth pages the owning team.
+        - alert: EventBackboneDLQDepthHigh
+          expr: sum(dlq_parked_events) by (cell, consumer_group) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "DLQ has parked events ({{ $labels.consumer_group }})"
+            description: "{{ $value }} parked events in {{ $labels.consumer_group }} for 10m. Triage + replay: tools/dlqctl/RUNBOOK.md."
+
+        - alert: EventBackboneDLQDepthCritical
+          expr: sum(dlq_parked_events) by (cell, consumer_group) > 100
+          for: 5m
+          labels:
+            severity: critical
+            team: data-platform
+          annotations:
+            summary: "DLQ depth critical ({{ $labels.consumer_group }})"
+            description: "> 100 parked events in {{ $labels.consumer_group }} — a systemic handler failure or downstream outage. Fix the handler, then dlqctl replay -all."
+
+        - alert: EventBackboneDLQParkRateHigh
+          expr: sum(rate(dlq_parked_total[5m])) by (cell, consumer_group) > 1
+          for: 5m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "Events parking to DLQ ({{ $labels.consumer_group }})"
+            description: "Sustained >1 event/s parking in {{ $labels.consumer_group }} — a handler is actively failing."
