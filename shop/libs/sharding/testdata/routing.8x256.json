@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "targets": {
+    "pg-0": "host=pg-0 dbname=cell",
+    "pg-1": "host=pg-1 dbname=cell",
+    "pg-2": "host=pg-2 dbname=cell",
+    "pg-3": "host=pg-3 dbname=cell",
+    "pg-4": "host=pg-4 dbname=cell",
+    "pg-5": "host=pg-5 dbname=cell",
+    "pg-6": "host=pg-6 dbname=cell",
+    "pg-7": "host=pg-7 dbname=cell"
+  },
+  "assignments": [
+    { "target": "pg-0", "shards": "0-31" },
+    { "target": "pg-1", "shards": "32-63" },
+    { "target": "pg-2", "shards": "64-95" },
+    { "target": "pg-3", "shards": "96-127" },
+    { "target": "pg-4", "shards": "128-159" },
+    { "target": "pg-5", "shards": "160-191" },
+    { "target": "pg-6", "shards": "192-223" },
+    { "target": "pg-7", "shards": "224-255" }
+  ]
+}

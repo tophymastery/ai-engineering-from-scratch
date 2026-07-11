@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "targets": {
+    "pg-0": "host=pg-0 dbname=cell port=5432",
+    "pg-1": "host=pg-1 dbname=cell port=5432",
+    "pg-2": "host=pg-2 dbname=cell port=5432",
+    "pg-3": "host=pg-3 dbname=cell port=5432"
+  },
+  "assignments": [
+    { "target": "pg-0", "shards": "0-63" },
+    { "target": "pg-1", "shards": "64-127" },
+    { "target": "pg-2", "shards": "128-191" },
+    { "target": "pg-3", "shards": "192-255" }
+  ]
+}

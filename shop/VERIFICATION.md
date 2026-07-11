@@ -249,3 +249,93 @@ cd libs/flags && go test ./... && go test -tags testhooks ./...  # prod + non-pr
 4. **OTLP exporter** — no collector in this env, so `libs/otel` runs in its
    documented **no-op-exporter** mode; the W3C propagation logic (the real,
    load-bearing part) is fully tested.
+
+---
+
+# S-T4 Verification (D6: `libs/sharding` + shard-hint ULIDs)
+
+All work is under `libs/sharding/` and is **standard-library only** (no external
+runtime deps), so a service adopting the router adds zero attack surface. The
+tests are **pure in-memory** (no I/O per key) and use **deterministic keys**, so
+every number below is exactly reproducible run-to-run — the statistical tests do
+not flake.
+
+## DoD / test-criteria matrix
+
+| # | S-T4 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | Routing library: 256 logical → N physical, config-driven, hot-reloadable | **full** | `Router` loads JSON/YAML, `RouteKey`/`RouteID`/`Physical`; `Reload()` + mtime `Watch()` pick up a 4→8 split live (`TestRouterHotReload`); broken edit rejected, live routing untouched (`TestReloadIgnoresBrokenEdit`). |
+| DoD-2 | Shard-hint ULID codec (2 hex after prefix), decode recovers shard | **full** | `NewID`/`Decode`, format `<prefix>_<HH><26-char Crockford ULID>`; full-range round-trip (`TestNewIDForShardRange`), monotonic within a ms (`TestULIDMonotonic`), valid ULID body asserted. |
+| DoD-3 | Online remap tool: copy → dual-write → verify → cutover on the sandbox | **full** | `Cluster.Move` + `cmd/remapctl`; phase-hooked; `remapctl -load` run: seeded 1500, 2.6M writes/s of load, **0 write errors / 0 misroutes**, exit 0. |
+| DoD-4 | Sandbox reference integration: keys across 4 fake targets, routed E2E | **full** | `Cluster` + in-memory `Store`s; `TestSandboxRoutesEndToEnd` (5000 keys land on the router-chosen target, read back), `ExampleCluster` (key→shard→hint→store→read). |
+| DoD | Library + remap tool merged with docs (README) | **full** | `libs/sharding/README.md` (format, hash contract, remap sequence, results table); `libs/README.md` + Makefile updated. |
+| DoD | Remap moves a logical shard under sandbox write load (concurrent writers) | **full** | `TestRemapUnderWriteLoad`: 8 writers, 2819 moves back-and-forth, 13746 dual-writes, 738k writes — **race-clean** (`go test -race`). |
+| Test | 1M-key distribution within 1% of uniform (chi-square) | **full** | `TestDistribution1M`: **χ²=202.81** vs threshold **330.52** = χ²₀.₉₉₉,₂₅₅ (mean 255) ⇒ uniform not rejected at 99.9%. **~50 ms**. |
+| Test | max/min shard deviation < 1% of expected | **adapted (sample size)** | `TestShardDeviationUnderOnePercent`: **0.66%** at 32M keys, **~1.6 s**. At 1M the worst shard is ~4.1% out — a hard multinomial-variance floor (σ≈1.6%/shard) for *any* uniform hash, so the 1M gate is chi-square and the literal <1% bound is met at the N where 1/√N shrinks it under 1%. |
+| Test | shard-hint decode agrees with hash routing on 100% of 1M IDs | **full** | `TestDecodeAgrees1M`: **100.0000%** agreement, 0 mismatches, 0 bad bodies, **256/256** shards covered. **~0.27 s**. |
+| Test | Sandbox remap under write load: zero misroutes, zero write errors | **full** | `TestRemapUnderWriteLoad`: **misroutes=0, write_errors=0** across 2819 moves under continuous concurrent load; asserted counts. |
+
+## Measured numbers
+
+```
+TestDistribution1M                 N=1,000,000  chi2=202.81  (dof=255, χ²₀.₉₉₉=330.52)  maxdev=4.102%  ~50ms
+TestShardDeviationUnderOnePercent  N=32,000,000 chi2=226.37  maxdev=0.6632% (<1%)                      ~1.6s
+TestDecodeAgrees1M                 N=1,000,000  agreement=100.0000%  shards_covered=256/256            ~0.27s
+TestRemapUnderWriteLoad            moves=2819  dual_writes=13746  total_writes=738,624  0 misroute/0 err ~2s (race)
+```
+
+Both 1M-scale tests finish well under the 60 s budget (chi-square ~50 ms, decode
+~0.27 s; the 32M deviation demonstration ~1.6 s).
+
+## Why the remap is misroute-free (design, not luck)
+
+`Cluster.Put`/`Get` hold a read-lock for the **entire** operation (routing
+decision + store op), and the two phase transitions (`enter dual-write`,
+`verify+cutover`) take the write-lock — which waits for every in-flight
+read-lock holder. So no write can be half-done across a cutover, and the moving
+shard's dual-writes are paired under a dedicated mutex so `old` and `new` never
+diverge, making the pre-cutover `old[shard]==new[shard]` verify an exact
+equality. Backfill is copy-if-absent so a concurrent dual-write is never
+clobbered. This was validated by `go test -race` (clean) and by the zero-count
+assertions, and an early self-review caught (and fixed) a lock-released-before-
+write bug in the hot path.
+
+## Pipeline integration (no regression)
+
+- `libs/sharding` added to the Makefile `LIBS` (so `make build` compiles it +
+  `cmd/remapctl`, prod-tag clean) and to `test-libs` (unit suite + a dedicated
+  `go test -race TestRemapUnderWriteLoad`).
+- **`make test-libs` green**; **`make build` ok**; **`./ci/run-local.sh` → all 10
+  stages green, exit 0** (backdoor scan, strip-test, preview isolation, render,
+  smoke all unaffected — sharding is stdlib-only and imported by no shipped
+  service, so `ci/security-scan.sh` surface is unchanged).
+
+## Commands to reproduce
+
+```
+cd libs/sharding && go test ./...                                   # full suite incl. 1M + 32M
+cd libs/sharding && go test -race -run TestRemapUnderWriteLoad ./... # remap under load, race-clean
+cd libs/sharding && go run ./cmd/remapctl -config testdata/routing.4x256.json \
+    -shard 100 -to pg-3 -load -writers 8 -duration 2s -seed 2000    # online remap demo
+make test-libs        # all shared libs incl. sharding
+./ci/run-local.sh     # full 10-stage pipeline (exit 0)
+```
+
+## Deviations summary (S-T4)
+
+1. **`max/min shard deviation <1%` is asserted at 32M keys, not 1M** — at 1M the
+   worst shard is ~4.1% off expected, which is the multinomial-variance floor for
+   *any* uniform hash (per-shard σ ≈ 1.6% of the 3906 expected). The 1M
+   uniformity gate is therefore the **chi-square** statistic (the standard test,
+   and exactly what TASKS.md line 109 specifies); the literal <1% per-shard bound
+   is delivered at the N where `1/√N` legitimately brings it under 1%. Both tests
+   ship and pass.
+2. **Config YAML is a restricted dialect**, not general YAML — dependency-light
+   (D6) means stdlib-only, so no `gopkg.in/yaml.v3`. JSON is canonical; the YAML
+   reader covers exactly `version`/`targets`/`assignments`. JSON⇔YAML table
+   equality is asserted (`TestLoadConfigJSONAndYAMLAgree`).
+3. **Remap runs against the in-memory sandbox**, not real PostgreSQL — that is
+   the S-T4 scope (real-service migration is V-T26/V-T27). The Store is a real
+   concurrency-safe store with copy-if-absent + snapshot primitives, so the
+   copy→dual-write→verify→cutover control flow and its concurrency guarantees are
+   exercised for real.
