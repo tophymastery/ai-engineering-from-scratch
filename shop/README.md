@@ -16,6 +16,8 @@ Kafka · PostgreSQL · Redis · GitOps (Argo CD) · OpenTelemetry.
 | [docs/02-api-design.md](docs/02-api-design.md) | API conventions, error envelope, idempotency protocol, endpoint + event contracts, extensibility |
 | [docs/03-testing.md](docs/03-testing.md) | Test pyramid, spawn-the-system tooling, test-data generation, isolation/repeatability, env control |
 | [docs/04-operations.md](docs/04-operations.md) | CI/CD pipeline & progressive delivery, observability, standardized cluster-traceable logging |
+| [docs/05-scale-100m.md](docs/05-scale-100m.md) | 100M-user scale-up: reconciled decision log (D1–D30), cell topology, capacity model v2, DR, cost, org |
+| [TASKS.md](TASKS.md) | Implementation roadmap: 1 ordered setup phase + 37 parallel fullstack slices (45 tasks) with Definition of Done + test criteria |
 
 ## System context
 
@@ -72,6 +74,7 @@ Every rule this blueprint was asked to satisfy, and exactly where it is fulfille
 | 12 | Controllable env for test | [03 §5](docs/03-testing.md#5-environment-control) | 12-factor config, env overlays, feature flags, fake providers (payment/map simulators) |
 | 13 | Test data isolated & repeatable | [03 §4](docs/03-testing.md#4-isolation--repeatability) | `run_id` scoping (rows, schemas, consumer groups), seeded RNG + frozen clock ⇒ identical reruns |
 | 14 | Standardized, traceable network logs across cluster | [04 §3](docs/04-operations.md#3-standardized-network-logging) | One JSON log envelope from shared middleware; W3C `traceparent` over HTTP **and** Kafka; edge-minted request-id |
+| 15 | Production grade @ 100M users | [05](docs/05-scale-100m.md) + [TASKS.md](TASKS.md) | Cell topology, sharded PG + transaction-durable idempotency, telemetry plane, risk + ledger + recon, tiered DR with drills |
 
 ## How to use this blueprint
 
