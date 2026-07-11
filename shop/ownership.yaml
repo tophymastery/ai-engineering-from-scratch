@@ -8,6 +8,7 @@
 services:
   # --- 12-service catalog (01 §1) ---
   identity:          { team: "Identity & Trust", slice: "V-T1"  }
+  identity-profile:  { team: "Identity & Trust", slice: "V-T2"  }
   merchant-catalog:  { team: "Discovery",        slice: "V-T3"  }
   search:            { team: "Discovery",        slice: "V-T4"  }
   cart:              { team: "Marketplace",      slice: "V-T7"  }

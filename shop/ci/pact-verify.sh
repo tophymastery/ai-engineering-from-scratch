@@ -71,5 +71,23 @@ curl -fsS -X POST "$IDBASE/v1/auth/register" -H 'Content-Type: application/json'
 sub "verify customer-bff -> identity-auth pact (register + login) — expect GREEN"
 "$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__identity-auth.json" "$IDBASE"
 
+# --- V-T2: customer-bff -> identity-profile pact, verified against the REAL service ---
+PPORT="${PROFILE_PROVIDER_PORT:-18113}"
+PBASE="http://localhost:$PPORT"
+P_PID=""
+p_cleanup() { [ -n "$P_PID" ] && kill "$P_PID" 2>/dev/null || true; }
+trap 'cleanup; id_cleanup; p_cleanup' EXIT
+
+sub "build + boot identity-profile provider (V-T2) on $PBASE"
+( cd services/identity-profile && "$GO" build -o "$BIN/identity-profile" . )
+PORT="$PPORT" SERVICE_NAME=identity-profile ENV=dev "$BIN/identity-profile" >"$BIN/profile.log" 2>&1 &
+P_PID=$!
+for _ in $(seq 1 40); do curl -fsS --max-time 1 "$PBASE/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -fsS --max-time 2 "$PBASE/healthz" >/dev/null || { echo "identity-profile never healthy"; cat "$BIN/profile.log"; exit 1; }
+echo "identity-profile healthy"
+
+sub "verify customer-bff -> identity-profile pact (create-profile + token-resolve) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__identity-profile.json" "$PBASE"
+
 echo
-echo "pact-verify: GREEN — placeholder + identity-auth honour their pacts; broken pact correctly reds the build"
+echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile honour their pacts; broken pact correctly reds the build"

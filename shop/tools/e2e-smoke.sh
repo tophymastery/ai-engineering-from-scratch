@@ -161,6 +161,43 @@ else
   if [ "$revoked" = 1 ]; then pass "revoked token rejected in ${lag}s (<=30s SLO, 5s poll)"; else bad "revoked token still accepted after 30s"; fi
 fi
 
+# --- 12. V-T2 profile CRUD + erasure (D3) — GATED on the identity-profile slot
+# being REAL (the stub can't encrypt/erase). Demoed THROUGH the customer-bff
+# passthrough (gateway routes /customer-bff/v1/profiles* -> identity-profile). ---
+echo "== V-T2 profile + residency + erasure (create->read->erase->unreadable, token survives) =="
+PROFILE_MODE="$(awk -F'\t' '$1=="identity-profile"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$PROFILE_MODE" != "real" ]; then
+  echo "  SKIP: identity-profile slot mode='$PROFILE_MODE' (not real) — profile/erasure runs only when identity-profile is the real slot"
+else
+  PBODY='{"jurisdiction":"ID","full_name":"Budi Santoso","phone":"+62-812-1111-2222","email":"budi@example.co.id","addresses":[{"label":"home","line1":"Jl. Merdeka 17","city":"Jakarta","postal":"10110"}]}'
+  PC="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/profiles" -H 'Content-Type: application/json' -H 'X-Cell: ID' -d "$PBODY" 2>/dev/null)"
+  USR="$(printf '%s' "$PC" | sed -n 's/.*"user_token":"\([^"]*\)".*/\1/p')"
+  if [ -n "$USR" ] && [[ "$PC" == *'"jurisdiction":"ID"'* ]]; then pass "profile created via customer-bff ($USR, cell ID)"; else bad "profile create failed (${PC:0:160})"; fi
+
+  # Read back — PII decrypted for the owner.
+  assert_body "profile read returns decrypted PII" GET "/customer-bff/v1/profiles/$USR" 'Budi Santoso'
+
+  # Residency: a request tagged for a non-owning cell (VN) is refused.
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H 'X-Cell: VN' "$GW/customer-bff/v1/profiles/$USR" 2>/dev/null)"
+  if [ "$code" = 404 ] || [ "$code" = 403 ]; then pass "non-owning cell (VN) cannot read an ID profile ($code)"; else bad "cross-cell read -> $code (want 403/404)"; fi
+
+  # Order snapshot carries ONLY tokens; replay works BEFORE erasure.
+  SNAP='{"order_token":"ord_e2e","user_token":"'"$USR"'","addr_token":"adr_e2e","jurisdiction":"ID","currency":"IDR","items":[{"sku":"s","qty":2,"price_minor":4500}]}'
+  assert_body "token-only order replays (pre-erase)" POST "/identity-profile/v1/orders:replay" '"total_minor":9000' "$SNAP"
+
+  # ERASE (crypto-shred) via the BFF.
+  ER="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/profiles/$USR:erase" -H 'Content-Type: application/json' -H 'X-Cell: ID' -d '{}' 2>/dev/null)"
+  if [[ "$ER" == *'"key_destroyed":true'* ]]; then pass "erasure crypto-shredded the key ($USR)"; else bad "erase failed (${ER:0:160})"; fi
+
+  # PII now unreadable — GET returns 410 PROFILE_ERASED.
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -H 'X-Cell: ID' "$GW/customer-bff/v1/profiles/$USR" 2>/dev/null)"
+  if [ "$code" = 410 ]; then pass "post-erase profile read is 410 (PII unreadable)"; else bad "post-erase read -> $code (want 410)"; fi
+
+  # Token STILL resolves (survives erasure) so order history replays.
+  assert_body "usr token survives erasure (exists+erased)" GET "/customer-bff/v1/tokens/$USR" '"erased":true'
+  assert_body "token-only order STILL replays (post-erase)" POST "/identity-profile/v1/orders:replay" '"total_minor":9000' "$SNAP"
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

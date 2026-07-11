@@ -1,0 +1,62 @@
+# networkpolicy.yaml — V-T2 / D3: DENY non-owning-cell access to the PII store.
+#
+# identity-profile holds per-jurisdiction PII. D1 homes every city to exactly ONE
+# cell and forbids cross-cell calls; D3 requires PII to be served ONLY from its
+# owning cell ("admin tooling fetches PII from the owning cell"). This policy is
+# the enforcement: it is default-deny (both directions) and admits ingress ONLY
+# from same-cell workloads, so a pod in ANY other cell's namespace — even another
+# identity-profile replica homed for a different jurisdiction — is denied at the
+# network layer, independent of app-level checks.
+#
+# The owning cell is stamped by the overlay via the `shop.io/cell` label (here the
+# base ships cell: id as the concrete example; overlays patch it per cell).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: identity-profile-cell-isolation
+  labels:
+    app: identity-profile
+    app.kubernetes.io/part-of: shop
+    shop.io/cell: id
+spec:
+  podSelector:
+    matchLabels:
+      app: identity-profile
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only same-cell callers may reach the PII API: the cell's BFFs/gateway/admin
+    # plane, selected by the SAME shop.io/cell label. A different cell's
+    # namespace/pods do not match, so they are denied (default-deny + this allow).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              shop.io/cell: id
+          podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: ["gateway", "customer-bff", "admin-bff", "identity-profile"]
+      ports:
+        - protocol: TCP
+          port: 8113
+  egress:
+    # DNS.
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Its OWN in-cell PII database only (same cell label). No cross-cell egress.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              shop.io/cell: id
+          podSelector:
+            matchLabels:
+              app: identity-profile-db
+      ports:
+        - protocol: TCP
+          port: 5432

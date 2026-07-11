@@ -1,0 +1,319 @@
+# identity-profile.v1 — profile, residency & erasure (V-T2, implements D3).
+# identity-profile OWNS customer PII (name/phone/email/address); everything it
+# emits carries usr_/adr_ TOKENS only. Conventions (02 §1): /v1 paths, snake_case
+# fields, the 02 §2 error envelope on every non-2xx. Prefixed-ULID tokens
+# (usr_/adr_). PII is AES-256-GCM at rest under a per-user DEK; erasure destroys
+# that key (crypto-shredding). PII is resident in the owning jurisdiction cell
+# (in-country for ID/VN) — the X-Cell header selects the cell; a non-owning cell
+# is refused (403 PROFILE_RESIDENCY_VIOLATION).
+#
+# Infra endpoints NOT modelled here (served at runtime): GET /healthz.
+openapi: 3.0.3
+info:
+  title: identity-profile
+  version: "1.0.0"
+  description: Customer PII (name/phone/email/address) with per-jurisdiction residency + crypto-shredding erasure (D3).
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/profiles:
+    post:
+      operationId: create_profile
+      summary: Create a profile (+ addresses). PII is encrypted at rest under a fresh per-user DEK.
+      parameters:
+        - $ref: "#/components/parameters/Cell"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfileInput" }
+      responses:
+        "201":
+          description: Profile created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+              example:
+                user_token: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                jurisdiction: "ID"
+                full_name: "Budi Santoso"
+                phone: "+62-812-1111-2222"
+                email: "budi@example.co.id"
+                addresses:
+                  - { addr_token: "adr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", label: "home", line1: "Jl. Merdeka 17", city: "Jakarta", postal: "10110" }
+                created_at: "2026-07-11T02:15:00Z"
+                updated_at: "2026-07-11T02:15:00Z"
+                erased: false
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/profiles/{user_token}:
+    get:
+      operationId: get_profile
+      summary: Read the (decrypted) profile for its owner.
+      parameters:
+        - $ref: "#/components/parameters/UserToken"
+        - $ref: "#/components/parameters/Cell"
+      responses:
+        "200":
+          description: Profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+              example:
+                user_token: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                jurisdiction: "ID"
+                full_name: "Budi Santoso"
+                phone: "+62-812-1111-2222"
+                email: "budi@example.co.id"
+                addresses: []
+                created_at: "2026-07-11T02:15:00Z"
+                updated_at: "2026-07-11T02:15:00Z"
+                erased: false
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: update_profile
+      summary: Update mutable PII (re-encrypted under the existing DEK).
+      parameters:
+        - $ref: "#/components/parameters/UserToken"
+        - $ref: "#/components/parameters/Cell"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfileInput" }
+      responses:
+        "200":
+          description: Updated profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/profiles/{user_token}/addresses:
+    post:
+      operationId: add_address
+      summary: Add an address (mints an adr_ token). PII encrypted under the user DEK.
+      parameters:
+        - $ref: "#/components/parameters/UserToken"
+        - $ref: "#/components/parameters/Cell"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddressInput" }
+      responses:
+        "201":
+          description: Address added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Address" }
+              example: { addr_token: "adr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", label: "work", line1: "Jl. Thamrin 1", city: "Jakarta", postal: "10230" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/profiles/{user_token}:erase:
+    post:
+      operationId: erase_profile
+      summary: Right-to-erasure. Crypto-shred the per-user DEK across primary + backups; PII becomes unrecoverable while usr_/adr_ tokens stay valid.
+      parameters:
+        - $ref: "#/components/parameters/UserToken"
+        - $ref: "#/components/parameters/Cell"
+      responses:
+        "200":
+          description: Erasure receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErasureReceipt" }
+              example:
+                user_token: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                jurisdiction: "ID"
+                erased: true
+                key_destroyed: true
+                stores: ["primary", "backup"]
+                erased_at: "2026-07-11T02:20:00Z"
+                addr_tokens: ["adr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"]
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/tokens/{token}:
+    get:
+      operationId: resolve_token
+      summary: Resolve a usr_/adr_ token to its NON-PII reference (kind, jurisdiction, erased). Used by the order path — never returns PII.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, example: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+        - $ref: "#/components/parameters/Cell"
+      responses:
+        "200":
+          description: Token reference (no PII).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenRef" }
+              example: { token: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", kind: "user", jurisdiction: "ID", erased: false, exists: true }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/orders:replay:
+    post:
+      operationId: replay_order
+      summary: Reconstruct an order from a TOKEN-ONLY snapshot (proves erasure does not break token-keyed history).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderSnapshot" }
+      responses:
+        "200":
+          description: Replayed order (no PII).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplayedOrder" }
+              example:
+                order_token: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                user_ref: { token: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", kind: "user", jurisdiction: "ID", erased: true, exists: true }
+                addr_ref: { token: "adr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", kind: "address", jurisdiction: "ID", erased: true, exists: true }
+                total_minor: 10500
+                currency: "IDR"
+                line_count: 2
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    UserToken:
+      name: user_token
+      in: path
+      required: true
+      schema: { type: string, example: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+    Cell:
+      name: X-Cell
+      in: header
+      required: false
+      description: Owning jurisdiction cell (ID/VN/...). A non-owning cell is refused (residency).
+      schema: { type: string, example: "ID" }
+  schemas:
+    AddressInput:
+      type: object
+      properties:
+        label: { type: string, example: "home" }
+        line1: { type: string, example: "Jl. Merdeka 17" }
+        city: { type: string, example: "Jakarta" }
+        postal: { type: string, example: "10110" }
+        geo: { type: string, example: "-6.175,106.827" }
+    Address:
+      type: object
+      required: [addr_token, label]
+      properties:
+        addr_token: { type: string }
+        label: { type: string }
+        line1: { type: string }
+        city: { type: string }
+        postal: { type: string }
+        geo: { type: string }
+    ProfileInput:
+      type: object
+      properties:
+        user_token: { type: string, description: "Optional; minted if omitted." }
+        jurisdiction: { type: string, example: "ID" }
+        full_name: { type: string, example: "Budi Santoso" }
+        phone: { type: string, example: "+62-812-1111-2222" }
+        email: { type: string, example: "budi@example.co.id" }
+        addresses:
+          type: array
+          items: { $ref: "#/components/schemas/AddressInput" }
+    Profile:
+      type: object
+      required: [user_token, jurisdiction, created_at, updated_at, erased]
+      properties:
+        user_token: { type: string }
+        jurisdiction: { type: string }
+        full_name: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        addresses:
+          type: array
+          items: { $ref: "#/components/schemas/Address" }
+        created_at: { type: string }
+        updated_at: { type: string }
+        erased: { type: boolean }
+    ErasureReceipt:
+      type: object
+      required: [user_token, jurisdiction, erased, key_destroyed, stores, erased_at]
+      properties:
+        user_token: { type: string }
+        jurisdiction: { type: string }
+        erased: { type: boolean }
+        key_destroyed: { type: boolean }
+        stores:
+          type: array
+          items: { type: string }
+        erased_at: { type: string }
+        addr_tokens:
+          type: array
+          items: { type: string }
+    TokenRef:
+      type: object
+      required: [token, kind, jurisdiction, erased, exists]
+      properties:
+        token: { type: string }
+        kind: { type: string, enum: [user, address] }
+        jurisdiction: { type: string }
+        erased: { type: boolean }
+        exists: { type: boolean }
+    OrderSnapshot:
+      type: object
+      required: [order_token, user_token, jurisdiction]
+      properties:
+        order_token: { type: string }
+        user_token: { type: string }
+        addr_token: { type: string }
+        jurisdiction: { type: string }
+        currency: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              sku: { type: string }
+              qty: { type: integer }
+              price_minor: { type: integer }
+    ReplayedOrder:
+      type: object
+      required: [order_token, total_minor, currency, line_count]
+      properties:
+        order_token: { type: string }
+        user_ref: { $ref: "#/components/schemas/TokenRef" }
+        addr_ref: { $ref: "#/components/schemas/TokenRef" }
+        total_minor: { type: integer }
+        currency: { type: string }
+        line_count: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "PROFILE_RESIDENCY_VIOLATION"
+              message: "This cell does not serve that jurisdiction; PII is only accessible from its owning cell."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

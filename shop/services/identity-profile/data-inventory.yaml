@@ -1,0 +1,32 @@
+# data-inventory.yaml — the CI-validated PII data inventory for identity-profile
+# (D3: "a machine-readable data-inventory + retention register is checked in and
+# CI-validated like the log schema"). tools/piiscan check-inventory asserts that
+# EVERY PII-bearing column in services/identity-profile/migrations is listed here
+# (an unregistered PII column turns CI red) and that every class resolves to a
+# retention-register.yaml entry.
+#
+# Every column below is encrypted at rest (AES-256-GCM under a per-user DEK) and
+# resident in the owning jurisdiction cell only (in-country for ID/VN).
+version: 1
+service: identity-profile
+decision: D3
+stores:
+  - name: profiles
+    residency: per-cell            # one DB per jurisdiction; in-country for ID/VN
+    backup: ciphertext-only        # backups carry ciphertext, never the keystore
+    columns:
+      - { column: full_name_ct, class: name,  encrypted: true }
+      - { column: phone_ct,     class: phone, encrypted: true }
+      - { column: email_ct,     class: email, encrypted: true }
+  - name: addresses
+    residency: per-cell
+    backup: ciphertext-only
+    columns:
+      - { column: line1_ct,  class: address, encrypted: true }
+      - { column: city_ct,   class: address, encrypted: true }
+      - { column: postal_ct, class: address, encrypted: true }
+      - { column: geo_ct,    class: geo,     encrypted: true }
+# data_keys (the keystore) holds the wrapped per-user DEK — NOT personal data, so
+# it is not a PII column; it is the crypto-shred TARGET (see retention-register).
+non_pii_stores:
+  - data_keys      # wrapped DEK; destroyed on erasure

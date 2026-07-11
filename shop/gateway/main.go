@@ -37,6 +37,11 @@ import (
 // in contracts/openapi/{customer,driver}-bff.v1.yaml.
 var bffsWithAuthPassthrough = []string{"customer-bff", "driver-bff"}
 
+// bffsWithProfilePassthrough are the BFF prefixes whose /v1/profiles* + /v1/tokens/*
+// paths the gateway routes DIRECTLY to identity-profile (V-T2 / D3 — profile CRUD
+// + erasure via customer-bff). Same lifecycle as the auth passthrough above.
+var bffsWithProfilePassthrough = []string{"customer-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -116,6 +121,31 @@ func main() {
 		authProxy := httputil.NewSingleHostReverseProxy(idURL)
 		mux.Handle(bffPrefix+"v1/auth/", http.StripPrefix("/"+bff, authProxy))
 		log.Printf("auth passthrough %sv1/auth/* -> %s (identity-auth)", bffPrefix, identityBase)
+	}
+
+	// --- V-T2 / D3 profile passthrough ---
+	// identity-profile OWNS PII; the customer app does profile CRUD + erasure
+	// through the BFF. Same discover-from-route-table pattern as the auth
+	// passthrough: /customer-bff/v1/profiles* and /v1/tokens/* route directly to
+	// the identity-profile slot (stable per-slot port survives the stub->real
+	// swap). Documented in contracts/openapi/customer-bff.v1.yaml.
+	profileBase := upstreamFor(routes, "/identity-profile/")
+	for _, bff := range bffsWithProfilePassthrough {
+		bffPrefix := "/" + bff + "/"
+		if profileBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		pURL, err := url.Parse(profileBase)
+		if err != nil {
+			log.Fatalf("bad identity-profile upstream %q: %v", profileBase, err)
+		}
+		pProxy := httputil.NewSingleHostReverseProxy(pURL)
+		strip := http.StripPrefix("/"+bff, pProxy)
+		// Exact create path + the {user_token} subtree + token resolution.
+		mux.Handle(bffPrefix+"v1/profiles", strip)
+		mux.Handle(bffPrefix+"v1/profiles/", strip)
+		mux.Handle(bffPrefix+"v1/tokens/", strip)
+		log.Printf("profile passthrough %sv1/profiles* -> %s (identity-profile)", bffPrefix, profileBase)
 	}
 
 	flagSet := flags.FromEnv()

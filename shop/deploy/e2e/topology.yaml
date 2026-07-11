@@ -37,6 +37,9 @@ services:
   - { name: notification,      port: 8110, mode: stub, contract: contracts/openapi/notification.v1.yaml,      real_cmd: "" }
   - { name: rating,            port: 8111, mode: stub, contract: contracts/openapi/rating.v1.yaml,            real_cmd: "" }
   - { name: settlement,        port: 8112, mode: stub, contract: contracts/openapi/settlement.v1.yaml,        real_cmd: "" }
+  # identity-profile is the V-T2 PII slice: real_cmd boots the built binary
+  # (tools/identity-profile-realcmd.sh). `make e2e-sync` promotes it stub->real.
+  - { name: identity-profile,  port: 8113, mode: stub, contract: contracts/openapi/identity-profile.v1.yaml,  real_cmd: "bash tools/identity-profile-realcmd.sh" }
   # --- 4 BFFs (01 §2) ---
   - { name: customer-bff,      port: 8121, mode: stub, contract: contracts/openapi/customer-bff.v1.yaml,      real_cmd: "" }
   - { name: merchant-bff,      port: 8122, mode: stub, contract: contracts/openapi/merchant-bff.v1.yaml,      real_cmd: "" }

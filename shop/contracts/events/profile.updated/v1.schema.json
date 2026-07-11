@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/profile.updated/v1.schema.json",
+  "title": "profile.updated v1",
+  "description": "Emitted by identity-profile on profile create/update/address-add (V-T2 / D3). TOKEN-ONLY payload: usr_/adr_ tokens, jurisdiction and an action verb — NEVER PII (name/phone/email/address). Key aggregate:user_token. D30: additive-only within this topic.",
+  "x-topic": "profile.updated",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "profile.updated" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "profile" },
+        "id": { "type": "string", "description": "usr_ token — never PII (D3)." },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["user_token", "jurisdiction", "action"],
+      "properties": {
+        "user_token": { "type": "string", "description": "usr_ token — never PII (D3)." },
+        "jurisdiction": { "type": "string", "description": "owning cell (ID/VN/...)." },
+        "action": { "type": "string", "description": "created | updated | address_added" },
+        "addr_tokens": {
+          "type": "array",
+          "items": { "type": "string", "description": "adr_ token — never PII (D3)." }
+        }
+      }
+    }
+  }
+}

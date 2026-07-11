@@ -38,6 +38,9 @@ done
 # V-T1: prebuild the identity-auth slice binary so the identity slot's real_cmd
 # (tools/identity-realcmd.sh) execs it immediately when swapped to real.
 ( cd "$ROOT/services/identity-auth" && "$GO" build -o "$BIN/identity-auth" . )
+# V-T2: prebuild the identity-profile slice binary (its real_cmd is
+# tools/identity-profile-realcmd.sh).
+( cd "$ROOT/services/identity-profile" && "$GO" build -o "$BIN/identity-profile" . )
 E2ECTL="$BIN/e2ectl"
 export STUBGEN="$BIN/stubgen"
 

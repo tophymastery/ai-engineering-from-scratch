@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-profile
+  labels:
+    app: identity-profile
+    shop.io/cell: id
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: identity-profile
+  template:
+    metadata:
+      labels:
+        app: identity-profile
+        shop.io/cell: id
+    spec:
+      containers:
+        - name: identity-profile
+          image: shop/identity-profile:latest
+          ports:
+            - containerPort: 8113
+          env:
+            - name: PORT
+              value: "8113"
+            - name: SERVICE_NAME
+              value: "identity-profile"
+            - name: ENV
+              value: "prod"
+            # The cell's jurisdiction (residency). Overlays set this per cell.
+            - name: PROFILE_JURISDICTIONS
+              value: "ID"
+            # Master KEK from KMS (crypto-shred wraps per-user DEKs with it).
+            - name: PROFILE_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: identity-profile-kek
+                  key: kek
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8113
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8113
+            initialDelaySeconds: 2
+            periodSeconds: 10
