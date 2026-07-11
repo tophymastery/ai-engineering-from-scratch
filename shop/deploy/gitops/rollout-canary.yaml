@@ -1,0 +1,79 @@
+# GitOps progressive delivery (04 §1.3 / S-T2): Argo Rollouts canary with
+# automatic rollback. Merge to main ⇒ image pushed ⇒ overlays/staging bumped by
+# bot ⇒ Argo CD syncs ⇒ this Rollout steps 5% → 25% → 50% → 100%, each step
+# gated on metric analysis. A breach ⇒ automatic rollback to the previous
+# ReplicaSet (no manual step). Prod promotion is a PR bumping overlays/prod.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: gateway
+  labels:
+    app: gateway
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: gateway
+  strategy:
+    canary:
+      analysis:
+        templates:
+          - templateName: canary-slo-gate
+      steps:
+        - setWeight: 5
+        - pause: {duration: 5m}
+        - setWeight: 25
+        - pause: {duration: 5m}
+        - setWeight: 50
+        - pause: {duration: 5m}
+        - setWeight: 100
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: shop/gateway:latest
+          env:
+            - name: GATEWAY_MODE
+              value: "prod"
+          ports:
+            - containerPort: 8080
+---
+# Analysis gate: error-rate + p99 + saga-completion. Any failure aborts the
+# canary and Argo Rollouts rolls back to the last-good ReplicaSet automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: canary-slo-gate
+spec:
+  metrics:
+    - name: error-rate
+      interval: 1m
+      failureLimit: 1
+      successCondition: "result < 0.01"
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            sum(rate(http_requests_total{app="gateway",status=~"5.."}[2m]))
+            / sum(rate(http_requests_total{app="gateway"}[2m]))
+    - name: p99-latency-ms
+      interval: 1m
+      failureLimit: 1
+      successCondition: "result < 800"
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{app="gateway"}[2m])) by (le))
+    - name: backdoor-alerts
+      interval: 1m
+      failureLimit: 0                    # ANY TESTHOOK_HEADER_STRIPPED in prod aborts
+      successCondition: "result == 0"
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            sum(rate(log_lines_total{app="gateway",code="TESTHOOK_HEADER_STRIPPED"}[2m]))

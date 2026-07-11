@@ -1,14 +1,15 @@
-# Shop platform CI scaffold (S-T1). GitHub-Actions-shaped.
+# Shop platform CI — FULL PR pipeline (S-T2, implements D29 + 04 §1.2/§1.3).
 #
 # ACTIVATION: this file lives at shop/ci/pipeline.yml on purpose. This repo is
-# NOT the shop monorepo; when shop/ is extracted to its own repository, move
-# this file to .github/workflows/pipeline.yml and it runs as-is. Until then the
-# identical stages run locally via ci/run-local.sh (and `make`), so the scaffold
-# is exercised without a live Actions runner.
+# NOT the shop monorepo; when shop/ is extracted to its own repository, move it
+# to .github/workflows/pipeline.yml and it runs as-is. Until then the identical
+# stages run locally via ci/run-local.sh (and `make`), which is the source of
+# truth for "reference PR green / merge blocked" in this environment.
 #
-# S-T2 extends this into the full pipeline (04 §1.2): lint -> unit -> contract
-# -> build/sign -> integration -> preview E2E -> security scan. S-T1 ships the
-# green skeleton: lint/build, change-detection, render, and smoke.
+# Stage order (04 §1.2):
+#   lint+typecheck → unit → contract → build/sign → backdoor-scan
+#   → integration (gateway strip+alert) → preview deploy → preview E2E/isolation
+#   → security scan.  Merge is allowed only with ALL gates green.
 name: shop-ci
 on:
   pull_request:
@@ -17,15 +18,13 @@ on:
 
 jobs:
   changes:
-    # Path-based change detection: compute the buildable paths this PR touches
-    # so downstream build/test only run for affected modules.
+    # Path-based change detection: build/test only affected modules downstream.
     runs-on: ubuntu-latest
     outputs:
       paths: ${{ steps.detect.outputs.paths }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
       - id: detect
         working-directory: shop
         run: |
@@ -33,32 +32,113 @@ jobs:
           tools/changed-paths.sh --base "origin/${{ github.base_ref || 'main' }}" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-  build-test:
+  lint-unit:
     needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-      - name: lint + build + unit (placeholder & gateway)
+        with: { go-version: "1.24" }
+      - name: lint + typecheck + unit (both build tags)
         working-directory: shop
         run: make test
-      - name: render kustomize overlays
-        working-directory: shop
-        run: make render
 
-  smoke:
-    needs: build-test
+  contract:
+    needs: lint-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pact provider verification against the broker — wired in S-T5. Green
+      # placeholder gate until then so the pipeline shape is complete.
+      - name: contract (pact verify) — placeholder
+        working-directory: shop
+        run: echo "contract gate: S-T5 wires the Pact broker; placeholder PASS"
+
+  build-sign:
+    needs: contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-      - name: boot stack + smoke
+        with: { go-version: "1.24" }
+      - name: build images (prod tags, multi-arch, SBOM)
+        working-directory: shop
+        run: make build
+      # cosign keyless sign + SBOM attestation — see ci/cosign.md. Needs a
+      # registry + OIDC, so config-only in the sandbox.
+      - name: cosign sign (config-only here)
+        working-directory: shop
+        run: cat ci/cosign.md
+
+  backdoor-scan:
+    needs: build-sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: D29 layer 1 — prod binaries carry zero testhook symbols
+        working-directory: shop
+        run: make backdoor-scan   # includes the expected-fail red fixture
+
+  integration:
+    needs: backdoor-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: D29 layers 2+3 — gateway strip + prod-log alert
+        working-directory: shop
+        run: make strip-test
+
+  preview-e2e:
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      # Real cluster: Argo CD ApplicationSet (deploy/gitops/preview-applicationset.yaml)
+      # renders deploy/preview-shared with only changed services. Here we simulate.
+      - name: deploy shared preview + cost model
+        working-directory: shop
+        run: make preview PR=${{ github.event.pull_request.number || 777 }}
+      - name: cross-PR isolation E2E (zero bleed)
+        working-directory: shop
+        run: make preview-isolation
+      - name: render preview + gitops manifests
+        working-directory: shop
+        run: make render-preview
+
+  security-scan:
+    needs: preview-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: image CVEs + dep audit (govulncheck / offline lint)
+        working-directory: shop
+        run: make security-scan
+
+  render-smoke:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: render overlays + boot + smoke
         working-directory: shop
         run: |
+          make render
           make up
           make smoke
           make down
+
+# Delivery (after merge) — 04 §1.3, GitOps progressive:
+#   main merge ⇒ images pushed ⇒ overlays/staging bumped by bot ⇒ Argo CD syncs
+#   ⇒ Argo Rollouts canary 5→25→50→100 (deploy/gitops/rollout-canary.yaml),
+#   each step gated on SLO analysis; breach ⇒ automatic rollback. Prod promotion
+#   is a PR bumping overlays/prod. Defined as manifests, not a workflow job.

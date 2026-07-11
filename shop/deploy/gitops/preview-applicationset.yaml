@@ -1,0 +1,40 @@
+# Argo CD ApplicationSet: one preview Application per OPEN PR (D29 / S-T2).
+#
+# The PR generator enumerates open PRs; for each, an Application renders
+# deploy/preview-shared/pr-preview-template.yaml with only that PR's CHANGED
+# services into the shared preview-shared namespace. The shared baseline
+# (baseline.yaml) is a SEPARATE, single Application — never duplicated per PR.
+# This is the mechanism that guarantees "no full-stack-per-PR".
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: pr-previews
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - pullRequest:
+        github:
+          owner: shop-platform
+          repo: shop
+        requeueAfterSeconds: 60
+  template:
+    metadata:
+      name: 'preview-pr-{{.number}}'
+      annotations:
+        preview.shop.io/ttl: "7d"
+        preview.shop.io/scale-to-zero-idle: "2h"
+    spec:
+      project: previews
+      source:
+        repoURL: https://github.com/shop-platform/shop
+        targetRevision: '{{.head_sha}}'
+        path: deploy/preview-shared
+        # only changed services are materialized by the render step (changed-paths.sh)
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: preview-shared
+      syncPolicy:
+        automated:
+          prune: true       # merge/close ⇒ per-PR overlay pruned (TTL is the backstop)
+          selfHeal: true
