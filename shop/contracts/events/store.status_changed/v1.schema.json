@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/store.status_changed/v1.schema.json",
+  "title": "store.status_changed v1",
+  "description": "Emitted by merchant-catalog (V-T3) when a merchant toggles store status (OPEN/BUSY/CLOSED). Keyed by aggregate:merchant_id. Consumers: search (hide closed stores) + cart (block checkout when closed). Carries the new status snapshot (02 §5). D30: additive-only within this topic.",
+  "x-topic": "store.status_changed",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "store.status_changed" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "merchant" },
+        "id": { "type": "string", "description": "mer_ token — the partition key (merchant_id)." },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["merchant_id", "status", "version"],
+      "properties": {
+        "merchant_id": { "type": "string", "description": "mer_ token." },
+        "status": { "type": "string", "enum": ["OPEN", "BUSY", "CLOSED"], "description": "the new store status." },
+        "version": { "type": "integer", "description": "monotonic status version." },
+        "status_etag": { "type": "string", "description": "strong validator; correlates with the HTTP ETag." }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "consumer": { "name": "cart" },
+  "provider": { "name": "merchant-catalog" },
+  "metadata": {
+    "note": "V-T3 pact: cart validates items against the catalog (01 §1 'cart: item validation against catalog') and revalidates on menu.updated. This pins the read contract cart depends on: the menu payload must carry item_id + price (Money: integer minor units + currency) + availability so cart can price and gate a line item. File-based broker, verified against the REAL merchant-catalog booted by ci/pact-verify.sh, which pre-seeds mer_01hpactcatalog0000000000000 with one item (provider state). item_id is non-deterministic so it is asserted present via shape (empty object pins the key path only through the pinned scalars); price + available are pinned.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "read a menu item's price + availability to validate a cart line",
+      "request": {
+        "method": "GET",
+        "path": "/v1/merchants/mer_01hpactcatalog0000000000000/menu"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "merchant_id": "mer_01hpactcatalog0000000000000",
+          "version": 2,
+          "items": [
+            { "name": "Som Tam", "price": { "amount": 8000, "currency": "THB" }, "available": true }
+          ]
+        }
+      }
+    }
+  ]
+}

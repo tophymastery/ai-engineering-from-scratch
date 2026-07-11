@@ -16,7 +16,7 @@ FAKES := payment-sim map-sim notify-sink
 
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
-        contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile \
+        contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog \
         e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
@@ -34,6 +34,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/_placeholder && $(GO) build ./...
 	@cd services/identity-auth && $(GO) build ./...
 	@cd services/identity-profile && $(GO) build ./...
+	@cd services/merchant-catalog && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -104,6 +105,10 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@echo "== V-T2 profile, residency & erasure (D3, -race): identity-profile service + PII scanner =="
 	@cd services/identity-profile && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@cd tools/piiscan && $(GO) vet ./... && $(GO) test -count=1 ./...
+	@echo "== V-T3 merchant catalog & menus (-race): ETag/If-Match 412 + transactional outbox events + schema-valid + flag =="
+	@cd services/merchant-catalog && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T3 perf criteria (no -race; race instrumentation invalidates latency): menu-CRUD p99<200ms + event-lag p99<2s =="
+	@cd services/merchant-catalog && $(GO) test -count=1 -run TestPerf ./...
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -179,6 +184,16 @@ render-profile: ## V-T2/D3: render the identity-profile base (Deployment+Service
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/profile.yaml && $(GO) run . $$root/deploy/dashboards/profile.json ); \
 	  echo "render-profile: identity-profile base (incl. cell-isolation NetworkPolicy) + alerts + dashboard rendered/parsed"
+
+render-catalog: ## V-T3: render the merchant-catalog base (Deployment+Service) + lint the catalog alerts/dashboard
+	@set -e; root=$$PWD; f=$$root/.render-catalog.yaml; \
+	  $(KUSTOMIZE) build deploy/base/merchant-catalog > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'kind: Deployment' $$f || { echo "render-catalog: Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-catalog: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/catalog.yaml && $(GO) run . $$root/deploy/dashboards/catalog.json ); \
+	  echo "render-catalog: merchant-catalog base (Deployment+Service) + alerts + dashboard rendered/parsed"
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
 	@ci/backdoor-scan.sh

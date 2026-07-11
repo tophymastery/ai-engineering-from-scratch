@@ -42,6 +42,13 @@ var bffsWithAuthPassthrough = []string{"customer-bff", "driver-bff"}
 // + erasure via customer-bff). Same lifecycle as the auth passthrough above.
 var bffsWithProfilePassthrough = []string{"customer-bff"}
 
+// bffsWithCatalogPassthrough are the BFF prefixes whose /v1/merchants* paths the
+// gateway routes DIRECTLY to merchant-catalog (V-T3 — menu editor + store-status
+// via merchant-bff, under ETag/If-Match). Same discover-from-route-table
+// lifecycle as the passthroughs above; documented in
+// contracts/openapi/merchant-bff.v1.yaml.
+var bffsWithCatalogPassthrough = []string{"merchant-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -146,6 +153,29 @@ func main() {
 		mux.Handle(bffPrefix+"v1/profiles/", strip)
 		mux.Handle(bffPrefix+"v1/tokens/", strip)
 		log.Printf("profile passthrough %sv1/profiles* -> %s (identity-profile)", bffPrefix, profileBase)
+	}
+
+	// --- V-T3 merchant-catalog passthrough ---
+	// merchant-catalog owns menus + store status; the merchant app edits them
+	// through the BFF. Same discover-from-route-table pattern:
+	// /merchant-bff/v1/merchants* routes directly to the merchant-catalog slot
+	// (stable per-slot port survives the stub->real swap). ETag/If-Match headers
+	// pass through the reverse proxy untouched (02 §1 concurrency preserved).
+	catalogBase := upstreamFor(routes, "/merchant-catalog/")
+	for _, bff := range bffsWithCatalogPassthrough {
+		bffPrefix := "/" + bff + "/"
+		if catalogBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		cURL, err := url.Parse(catalogBase)
+		if err != nil {
+			log.Fatalf("bad merchant-catalog upstream %q: %v", catalogBase, err)
+		}
+		cProxy := httputil.NewSingleHostReverseProxy(cURL)
+		strip := http.StripPrefix("/"+bff, cProxy)
+		mux.Handle(bffPrefix+"v1/merchants", strip)
+		mux.Handle(bffPrefix+"v1/merchants/", strip)
+		log.Printf("catalog passthrough %sv1/merchants* -> %s (merchant-catalog)", bffPrefix, catalogBase)
 	}
 
 	flagSet := flags.FromEnv()

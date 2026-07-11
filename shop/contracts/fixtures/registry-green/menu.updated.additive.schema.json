@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/menu.updated/v1.schema.json",
+  "title": "menu.updated v1 (additive fixture)",
+  "description": "GREEN fixture (V-T3): adds two OPTIONAL payload fields (category, prep_minutes) to menu.updated without touching required/existing shapes. `registryctl diff` MUST exit 0 — additive evolution within a topic is allowed (D30). Proves the search/cart consumers cannot be broken by an in-place shape change slipping through unnoticed.",
+  "x-topic": "menu.updated",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "menu.updated" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "merchant" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["merchant_id", "version", "items"],
+      "properties": {
+        "merchant_id": { "type": "string" },
+        "version": { "type": "integer" },
+        "menu_etag": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["item_id", "name", "amount", "currency", "available"],
+            "properties": {
+              "item_id": { "type": "string" },
+              "name": { "type": "string" },
+              "amount": { "type": "integer" },
+              "currency": { "type": "string" },
+              "available": { "type": "boolean" },
+              "category": { "type": "string", "description": "NEW optional field (additive)." }
+            }
+          }
+        },
+        "prep_minutes": { "type": "integer", "description": "NEW optional field (additive)." }
+      }
+    }
+  }
+}

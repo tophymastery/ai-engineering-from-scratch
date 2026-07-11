@@ -32,8 +32,122 @@ paths:
                 prep_eta_minutes: 18
         default:
           $ref: "#/components/responses/Error"
+  # --- V-T3 menu-editor + store-status passthrough (routes to merchant-catalog) ---
+  # The gateway routes /merchant-bff/v1/merchants* directly to the merchant-catalog
+  # slot (see gateway bffsWithCatalogPassthrough). ETag/If-Match flow through
+  # untouched → 412 on stale write (02 §1). Documented here for the merchant app.
+  /v1/merchants/{merchant_id}/menu:
+    get:
+      operationId: bff_get_menu
+      summary: Read a merchant's menu (proxied to merchant-catalog). Returns the ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+      responses:
+        "200":
+          description: Menu (+ ETag header).
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Menu" }
+              example:
+                merchant_id: "mer_01H8XGABCDE"
+                version: 3
+                etag: "\"a1b2c3\""
+                items:
+                  - { item_id: "itm_01H8XG1", name: "Som Tam", price: { amount: 8000, currency: "THB" }, available: true }
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      operationId: bff_edit_menu
+      summary: Edit the menu (upsert/remove items). Requires If-Match; 412 on stale ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MenuPatch" }
+            example:
+              upsert_items:
+                - { name: "Larb", price: { amount: 9000, currency: "THB" }, available: true }
+      responses:
+        "200":
+          description: Menu updated (+ new ETag); merchant-catalog publishes menu.updated.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Menu" }
+        "412":
+          description: Stale write — the If-Match ETag no longer matches the current menu.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/merchants/{merchant_id}/store-status:
+    get:
+      operationId: bff_get_store_status
+      summary: Read the store status (proxied to merchant-catalog). Returns the ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+      responses:
+        "200":
+          description: Store status (+ ETag header).
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreStatus" }
+              example: { merchant_id: "mer_01H8XGABCDE", status: "OPEN", version: 4, etag: "\"d4e5f6\"" }
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: bff_set_store_status
+      summary: Set the store status. Requires If-Match; 412 on stale ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [OPEN, BUSY, CLOSED] }
+            example: { status: "OPEN" }
+      responses:
+        "200":
+          description: Status updated (+ new ETag); merchant-catalog publishes store.status_changed.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreStatus" }
+        "412":
+          description: Stale write — the If-Match ETag no longer matches the current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        default:
+          $ref: "#/components/responses/Error"
 components:
   parameters:
+    MerchantID:
+      name: merchant_id
+      in: path
+      required: true
+      schema: { type: string, example: "mer_01H8XGABCDE" }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: The resource's current ETag (from a prior GET). Stale value ⇒ 412 (02 §1).
+      schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -48,6 +162,55 @@ components:
         order_id: { type: string }
         status: { type: string, enum: [ACCEPTED, REJECTED] }
         prep_eta_minutes: { type: integer }
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    Item:
+      type: object
+      required: [item_id, name, price]
+      properties:
+        item_id: { type: string }
+        name: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        available: { type: boolean }
+    ItemInput:
+      type: object
+      required: [name, price]
+      properties:
+        item_id: { type: string }
+        name: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        available: { type: boolean }
+    Menu:
+      type: object
+      required: [merchant_id, version, etag, items]
+      properties:
+        merchant_id: { type: string }
+        version: { type: integer }
+        etag: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Item" }
+    MenuPatch:
+      type: object
+      properties:
+        upsert_items:
+          type: array
+          items: { $ref: "#/components/schemas/ItemInput" }
+        remove_item_ids:
+          type: array
+          items: { type: string }
+    StoreStatus:
+      type: object
+      required: [merchant_id, status, version, etag]
+      properties:
+        merchant_id: { type: string }
+        status: { type: string, enum: [OPEN, BUSY, CLOSED] }
+        version: { type: integer }
+        etag: { type: string }
     Error:
       type: object
       required: [error]

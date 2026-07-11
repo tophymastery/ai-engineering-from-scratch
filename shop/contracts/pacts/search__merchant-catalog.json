@@ -1,0 +1,40 @@
+{
+  "consumer": { "name": "search" },
+  "provider": { "name": "merchant-catalog" },
+  "metadata": {
+    "note": "V-T3 pact: the search indexer consumes merchant-catalog's menu + store-status reads (and, asynchronously, its menu.updated / store.status_changed events — schema-pinned in contracts/events/). File-based broker (see contracts/pacts/customer-bff__placeholder.json): registryctl pact-verify REPLAYS each interaction against the REAL merchant-catalog booted by ci/pact-verify.sh, asserting status + response shape. ci/pact-verify.sh pre-seeds the fixed merchant mer_01hpactcatalog0000000000000 with one item (provider state). Non-deterministic ids (item_id) are NOT pinned; stable scalars (merchant_id, store_status, item name/price/available) are.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "read a merchant's menu to (re)build the search index",
+      "request": {
+        "method": "GET",
+        "path": "/v1/merchants/mer_01hpactcatalog0000000000000/menu"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "merchant_id": "mer_01hpactcatalog0000000000000",
+          "items": [
+            { "name": "Som Tam", "price": { "amount": 8000, "currency": "THB" }, "available": true }
+          ]
+        }
+      }
+    },
+    {
+      "description": "read a merchant's store status to hide closed stores from results",
+      "request": {
+        "method": "GET",
+        "path": "/v1/merchants/mer_01hpactcatalog0000000000000/store-status"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "merchant_id": "mer_01hpactcatalog0000000000000",
+          "status": "OPEN"
+        }
+      }
+    }
+  ]
+}

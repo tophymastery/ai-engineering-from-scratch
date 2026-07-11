@@ -89,5 +89,40 @@ echo "identity-profile healthy"
 sub "verify customer-bff -> identity-profile pact (create-profile + token-resolve) — expect GREEN"
 "$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__identity-profile.json" "$PBASE"
 
+# --- V-T3: search/cart -> merchant-catalog pacts, verified against the REAL service ---
+CPORT="${CATALOG_PROVIDER_PORT:-18102}"
+CBASE="http://localhost:$CPORT"
+C_PID=""
+c_cleanup() { [ -n "$C_PID" ] && kill "$C_PID" 2>/dev/null || true; }
+trap 'cleanup; id_cleanup; p_cleanup; c_cleanup' EXIT
+
+sub "build + boot merchant-catalog provider (V-T3) on $CBASE (catalog_v1 on)"
+( cd services/merchant-catalog && "$GO" build -o "$BIN/merchant-catalog" . )
+PORT="$CPORT" SERVICE_NAME=merchant-catalog ENV=dev FLAG_CATALOG_V1=true "$BIN/merchant-catalog" >"$BIN/catalog.log" 2>&1 &
+C_PID=$!
+for _ in $(seq 1 40); do curl -fsS --max-time 1 "$CBASE/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -fsS --max-time 2 "$CBASE/healthz" >/dev/null || { echo "merchant-catalog never healthy"; cat "$BIN/catalog.log"; exit 1; }
+echo "merchant-catalog healthy"
+
+# Provider state (like the identity-auth login seed): a fixed merchant with one
+# menu item + OPEN store, so the search/cart read interactions have something to
+# read. The ETag is taken from the GET response header — exactly the If-Match value.
+CMID="mer_01hpactcatalog0000000000000"
+curl -fsS -X POST "$CBASE/v1/merchants" -H 'Content-Type: application/json' \
+  -d '{"merchant_id":"'"$CMID"'","name":"Pact Kitchen"}' >/dev/null \
+  || { echo "failed to seed pact merchant"; exit 1; }
+MENU_ETAG="$(curl -s -D - -o /dev/null "$CBASE/v1/merchants/$CMID/menu" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+curl -fsS -X PATCH "$CBASE/v1/merchants/$CMID/menu" -H 'Content-Type: application/json' -H "If-Match: $MENU_ETAG" \
+  -d '{"upsert_items":[{"name":"Som Tam","price":{"amount":8000,"currency":"THB"},"available":true}]}' >/dev/null \
+  || { echo "failed to seed pact menu item"; exit 1; }
+STATUS_ETAG="$(curl -s -D - -o /dev/null "$CBASE/v1/merchants/$CMID/store-status" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+curl -fsS -X PUT "$CBASE/v1/merchants/$CMID/store-status" -H 'Content-Type: application/json' -H "If-Match: $STATUS_ETAG" \
+  -d '{"status":"OPEN"}' >/dev/null || { echo "failed to seed pact store status"; exit 1; }
+
+sub "verify search -> merchant-catalog pact (menu + store-status reads) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/search__merchant-catalog.json" "$CBASE"
+sub "verify cart -> merchant-catalog pact (item price + availability read) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/cart__merchant-catalog.json" "$CBASE"
+
 echo
-echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile honour their pacts; broken pact correctly reds the build"
+echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog honour their pacts; broken pact correctly reds the build"

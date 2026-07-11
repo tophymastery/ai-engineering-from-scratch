@@ -5,6 +5,10 @@
 # Compiled binaries from `go build ./...` run inside a module dir.
 /gateway/gateway
 /services/_placeholder/placeholder
+# Real-service binaries from `go build ./...` inside their module dirs.
+/services/identity-auth/identity-auth
+/services/identity-profile/identity-profile
+/services/merchant-catalog/merchant-catalog
 # S-T7 fake-provider binaries (services build to .run/ in process mode).
 /services/fakes/payment-sim/payment-sim
 /services/fakes/map-sim/map-sim

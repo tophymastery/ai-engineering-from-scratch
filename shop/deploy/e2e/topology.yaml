@@ -26,7 +26,10 @@ services:
   # identity is the FIRST real slice (V-T1): real_cmd boots the built identity-auth
   # binary (tools/identity-realcmd.sh). `make e2e-sync` promotes it stub->real.
   - { name: identity,          port: 8101, mode: stub, contract: contracts/openapi/identity.v1.yaml,          real_cmd: "bash tools/identity-realcmd.sh" }
-  - { name: merchant-catalog,  port: 8102, mode: stub, contract: contracts/openapi/merchant-catalog.v1.yaml,  real_cmd: "" }
+  # merchant-catalog is the V-T3 slice: real_cmd boots the built binary
+  # (tools/merchant-catalog-realcmd.sh, catalog_v1 on). `make e2e-sync` promotes
+  # it stub->real once the binary builds.
+  - { name: merchant-catalog,  port: 8102, mode: stub, contract: contracts/openapi/merchant-catalog.v1.yaml,  real_cmd: "bash tools/merchant-catalog-realcmd.sh" }
   - { name: search,            port: 8103, mode: stub, contract: contracts/openapi/search.v1.yaml,            real_cmd: "" }
   - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "" }
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
