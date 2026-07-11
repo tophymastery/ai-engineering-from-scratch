@@ -36,3 +36,47 @@ services:
       retries: 5
     ports:
       - "8080:8080"
+
+  # --- S-T7 fake providers (03 §5) — no external side effects; boot with the
+  #     stack so every slice develops and E2E-tests against them. Each answers
+  #     its own /healthz via the -healthcheck binary flag (distroless: no shell).
+  payment-sim:
+    build:
+      context: ./services/fakes/payment-sim
+    environment:
+      PORT: "8091"
+      PSP_SEED: "42"
+      PSP_TIMEOUT_MS: "200"
+    healthcheck:
+      test: ["CMD", "/payment-sim", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    expose:
+      - "8091"
+
+  map-sim:
+    build:
+      context: ./services/fakes/map-sim
+    environment:
+      PORT: "8092"
+    healthcheck:
+      test: ["CMD", "/map-sim", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    expose:
+      - "8092"
+
+  notify-sink:
+    build:
+      context: ./services/fakes/notify-sink
+    environment:
+      PORT: "8093"
+    healthcheck:
+      test: ["CMD", "/notify-sink", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    expose:
+      - "8093"

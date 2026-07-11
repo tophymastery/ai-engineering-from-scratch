@@ -8,11 +8,13 @@ OVERLAYS := dev preview staging prod
 # Shared libs (S-T3/S-T4/S-T7). Each is its own module; a libs/ change rebuilds
 # every importer (change-detection fan-out). testhooks is vetted with both tags
 # by the `test` target below.
-LIBS := errors otel logging flags idempotency sharding testhooks eventbus outbox inbox
+LIBS := errors otel logging flags idempotency sharding testhooks eventbus outbox inbox factories
+# S-T7 fake providers (03 §5) — std-lib Go services, own modules.
+FAKES := payment-sim map-sim notify-sink
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down seed smoke test test-libs render changed build \
+.PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo
 
@@ -26,13 +28,15 @@ up: ## Boot the empty stack (docker-compose, or process fallback) and wait healt
 down: ## Tear the stack down
 	@tools/dev-down.sh
 
-build: ## Compile the shared libs + gateway + placeholder binaries (prod tags = no testhooks)
+build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod tags = no testhooks)
 	@set -e; for l in $(LIBS); do (cd libs/$$l && $(GO) build ./...); done
 	@cd services/_placeholder && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
+	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
 	@cd tools/stubgen && $(GO) build ./...
 	@cd tools/dlqctl && $(GO) build ./...
+	@cd tools/seedctl && $(GO) build ./...
 	@cd libs/eventbus/example && $(GO) build ./...
 	@echo "build ok"
 
@@ -42,19 +46,50 @@ contract-validate: ## S-T5/D30 merge gate: OpenAPI conventions + event registry 
 pact-verify: ## S-T5 merge gate: file-based Pact broker verified against the booted placeholder (+ asserted broken-pact red fixture)
 	@ci/pact-verify.sh
 
-seed: ## Seed golden datasets (STUB — real seedctl lands in S-T7)
-	@echo "TODO(S-T7): seed SCENARIO=$${SCENARIO:-demo-small} via seedctl + factories."
-	@echo "seed: no-op stub (S-T1 ships no business data)."
+seed: ## Seed a golden dataset (SCENARIO=demo-small|lunch-rush) into the running stack via PUBLIC APIs
+	@set -e; scen="$${SCENARIO:-demo-small}"; url="$${PLACEHOLDER_URL:-http://localhost:8081}"; \
+	  test -f scenarios/$$scen.yaml || { echo "seed: no scenarios/$$scen.yaml"; exit 1; }; \
+	  if ! curl -fsS --max-time 2 "$$url/healthz" >/dev/null 2>&1; then \
+	    echo "seed: stack not up — booting it first"; tools/dev-up.sh; fi; \
+	  mkdir -p .run; \
+	  echo "seed: applying scenarios/$$scen.yaml to $$url via /kv public API"; \
+	  ( cd tools/seedctl && $(GO) run . -scenario ../../scenarios/$$scen.yaml -target "$$url" -out ../../.run/seed-$$scen.json ); \
+	  echo "seed: canonical dump -> .run/seed-$$scen.json (pushed to the running stack)"
 
 smoke: ## Run the end-to-end smoke check against the booted stack
 	@tools/smoke.sh
 
-test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) + shared-lib unit tests
+test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) + shared-lib + fakes + seedctl tests
 	@cd libs/testhooks && $(GO) vet ./... && $(GO) vet -tags testhooks ./...
 	@cd services/_placeholder && $(GO) vet ./...
 	@cd gateway && $(GO) vet ./...
 	@$(MAKE) --no-print-directory test-libs
+	@$(MAKE) --no-print-directory test-fakes
+	@$(MAKE) --no-print-directory test-seed
 	@tools/changed-paths_test.sh
+
+test-fakes: ## S-T7: fake-provider tests incl. the 50-rerun payment-sim determinism test (-race on the webhook path)
+	@echo "== factories: same seed => byte-identical entities; ids are valid shard-hint ULIDs =="
+	@cd libs/factories && $(GO) test -count=1 ./...
+	@echo "== payment-sim: 50-rerun determinism + ordered webhooks (-race) + contract conformance =="
+	@cd services/fakes/payment-sim && $(GO) test -race -count=1 ./...
+	@echo "== map-sim: zero-randomness routing/ETA =="
+	@cd services/fakes/map-sim && $(GO) test -count=1 ./...
+	@echo "== notify-sink: queryable inbox capture/query/clear =="
+	@cd services/fakes/notify-sink && $(GO) test -count=1 ./...
+	@echo "test-fakes: all fake-provider tests passed"
+
+test-seed: ## S-T7: seedctl determinism — same seed+scenario => byte-identical dataset (in-proc + across two CLI runs)
+	@echo "== seedctl: byte-identical dataset on rerun (hash compare) + referential integrity =="
+	@cd tools/seedctl && $(GO) test -count=1 ./...
+	@echo "== seedctl: byte-identical across two separate CLI process runs (lunch-rush) =="
+	@set -e; d=$$(mktemp -d); \
+	  ( cd tools/seedctl && $(GO) run . -scenario ../../scenarios/lunch-rush.yaml -dump-only -quiet > $$d/a.json ); \
+	  ( cd tools/seedctl && $(GO) run . -scenario ../../scenarios/lunch-rush.yaml -dump-only -quiet > $$d/b.json ); \
+	  ha=$$(sha256sum $$d/a.json | cut -d' ' -f1); hb=$$(sha256sum $$d/b.json | cut -d' ' -f1); \
+	  echo "  run1=$$ha"; echo "  run2=$$hb"; \
+	  [ "$$ha" = "$$hb" ] || { echo "seedctl: dumps differ across runs (non-deterministic)"; exit 1; }; \
+	  echo "seedctl: byte-identical across process reruns"; rm -rf $$d
 
 test-libs: ## Run the S-T3/S-T4 shared-lib unit tests (errors, otel, logging, flags, idempotency, sharding)
 	@set -e; for l in errors otel logging flags idempotency sharding; do \

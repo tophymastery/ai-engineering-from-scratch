@@ -1,0 +1,127 @@
+# map-sim.v1 — the deterministic routing/ETA fake adapter contract (S-T7, 03 §5).
+# Zero randomness: distance = haversine(from,to) × 1.3 road factor; duration =
+# distance ÷ fixed mode speed. Dispatch and tracking tests route against this and
+# never hit a paid maps API. Conventions (02 §1): /v1 paths, snake_case fields,
+# the 02 §2 error envelope on non-2xx. The fake also serves bare aliases
+# (/route, /eta) per the task spec; both route to the /v1 handlers documented here.
+openapi: 3.0.3
+info:
+  title: map-sim
+  version: "1.0.0"
+  description: >
+    Deterministic routing + ETA. distance_m = haversine × 1.3; duration_s =
+    distance_m ÷ speed(mode). Same input => byte-identical output, always.
+servers:
+  - url: http://map-sim:8092
+paths:
+  /v1/route:
+    post:
+      operationId: map_route
+      summary: Deterministic route between two points (distance, duration, polyline stub).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RouteRequest" }
+            example:
+              from: { lat: 13.7563, lng: 100.5018 }
+              to: { lat: 13.7460, lng: 100.5340 }
+              mode: "CAR"
+      responses:
+        "200":
+          description: Deterministic route.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Route" }
+              example:
+                distance_m: 4713
+                duration_s: 565
+                mode: "CAR"
+                polyline: "map-sim:v1:13.756300,100.501800->13.746000,100.534000"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/eta:
+    get:
+      operationId: map_eta
+      summary: Deterministic ETA (seconds) for a straight-line trip.
+      parameters:
+        - { name: from_lat, in: query, required: true, schema: { type: number, example: 13.7563 } }
+        - { name: from_lng, in: query, required: true, schema: { type: number, example: 100.5018 } }
+        - { name: to_lat,   in: query, required: true, schema: { type: number, example: 13.7460 } }
+        - { name: to_lng,   in: query, required: true, schema: { type: number, example: 100.5340 } }
+        - { name: mode,     in: query, required: false, schema: { type: string, enum: [CAR, BIKE, WALK], example: "BIKE" } }
+      responses:
+        "200":
+          description: Deterministic ETA.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Eta" }
+              example:
+                distance_m: 4713
+                duration_s: 848
+                mode: "BIKE"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    Point:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number }
+        lng: { type: number }
+    RouteRequest:
+      type: object
+      required: [from, to]
+      properties:
+        from: { $ref: "#/components/schemas/Point" }
+        to: { $ref: "#/components/schemas/Point" }
+        mode: { type: string, enum: [CAR, BIKE, WALK], description: "Fixed speed per mode. Default CAR." }
+    Route:
+      type: object
+      required: [distance_m, duration_s, mode, polyline]
+      properties:
+        distance_m: { type: integer, description: "Metres. haversine × 1.3, rounded." }
+        duration_s: { type: integer, description: "Seconds. distance_m ÷ mode speed, rounded." }
+        mode: { type: string, enum: [CAR, BIKE, WALK] }
+        polyline: { type: string, description: "Deterministic stub encoding of the two endpoints." }
+    Eta:
+      type: object
+      required: [distance_m, duration_s, mode]
+      properties:
+        distance_m: { type: integer }
+        duration_s: { type: integer }
+        mode: { type: string, enum: [CAR, BIKE, WALK] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx (bad coordinates, etc.)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "VALIDATION"
+              message: "from.lat is out of range [-90,90]."
+              details:
+                - { field: "from_lat", reason: "out_of_range" }
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

@@ -47,8 +47,9 @@ make render
 make render-preview
 make render-events
 
-step "[11/12] boot + smoke"
+step "[11/12] boot + seed (S-T7 demo-small via public APIs) + smoke"
 make up
+make seed SCENARIO=demo-small
 make smoke
 
 step "[12/12] teardown"

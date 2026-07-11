@@ -1,0 +1,13 @@
+# lunch-rush — the standing mid-size golden dataset (S-T7, 03 §3 shape). Peak
+# lunch load for a single region: many merchants + menus, a driver fleet mostly
+# online, a realistic spread of order states. Same seed => byte-identical rerun.
+# (Skewed/very-large load datasets live in V-T31.)
+seed: 42
+region: bkk
+merchants: {count: 25, menus_each: 30}
+customers: {count: 200}
+drivers:   {count: 60, online_ratio: 0.8}
+orders:
+  - {count: 40, state: DELIVERED}
+  - {count: 10, state: DISPATCHED}
+  - {count: 5,  state: PAYMENT_PENDING}

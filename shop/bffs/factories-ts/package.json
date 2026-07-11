@@ -1,0 +1,14 @@
+{
+  "name": "@shop/factories",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript mirror of libs/factories (S-T7): typed builders with seeded-RNG defaults + overrides for the core entities. Plain TS/JS, no runtime deps.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "comment": "No `npm install` is needed to read this package — it has zero dependencies. It compiles once BFF tooling (NestJS/tsc) arrives with the first BFF slice; until then it is checked in as source and kept in lockstep with libs/factories. See README.md."
+}
