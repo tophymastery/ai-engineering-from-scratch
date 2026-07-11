@@ -48,5 +48,28 @@ else
   echo "broken-pact fixture correctly failed (published-pact break => provider red, proven)"
 fi
 
+# --- V-T1: customer-bff -> identity-auth pact, verified against the REAL service ---
+IDPORT="${IDENTITY_PROVIDER_PORT:-18101}"
+IDBASE="http://localhost:$IDPORT"
+ID_PID=""
+id_cleanup() { [ -n "$ID_PID" ] && kill "$ID_PID" 2>/dev/null || true; }
+trap 'cleanup; id_cleanup' EXIT
+
+sub "build + boot identity-auth provider (V-T1) on $IDBASE"
+( cd services/identity-auth && "$GO" build -o "$BIN/identity-auth" . )
+PORT="$IDPORT" SERVICE_NAME=identity-auth ENV=dev "$BIN/identity-auth" >"$BIN/identity.log" 2>&1 &
+ID_PID=$!
+for _ in $(seq 1 40); do curl -fsS --max-time 1 "$IDBASE/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -fsS --max-time 2 "$IDBASE/healthz" >/dev/null || { echo "identity-auth never healthy"; cat "$BIN/identity.log"; exit 1; }
+echo "identity-auth healthy"
+
+# Provider state for the login interaction: pre-register the login user.
+curl -fsS -X POST "$IDBASE/v1/auth/register" -H 'Content-Type: application/json' \
+  -d '{"email":"pact-login@example.com","password":"hunter2pass"}' >/dev/null \
+  || { echo "failed to seed pact login user"; exit 1; }
+
+sub "verify customer-bff -> identity-auth pact (register + login) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__identity-auth.json" "$IDBASE"
+
 echo
-echo "pact-verify: GREEN — provider honours the published pact; broken pact correctly reds the build"
+echo "pact-verify: GREEN — placeholder + identity-auth honour their pacts; broken pact correctly reds the build"

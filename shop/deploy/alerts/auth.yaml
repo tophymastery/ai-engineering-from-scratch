@@ -1,0 +1,90 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: auth-edge
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: identity-and-trust
+    slice: V-T1
+    decisions: D4
+spec:
+  groups:
+    # SLOs (V-T1 / D4):
+    #   - edge verification adds < 1 ms p99 (no introspection on the hot path)
+    #   - revocation lag <= 30 s (replicated bloom denylist, polled)
+    #   - identity-auth availability is DETACHED from authed-traffic availability
+    - name: auth-edge.revocation
+      rules:
+        # Revocation lag = age of the denylist snapshot the gateway is serving
+        # from. The gateway exports gateway_denylist_age_seconds (now - last
+        # successful poll). Beyond the 30s SLO a revoked token may still be
+        # honoured — a security-relevant miss, so it pages.
+        - alert: AuthRevocationLagHigh
+          expr: max(gateway_denylist_age_seconds) by (cell) > 20
+          for: 1m
+          labels:
+            severity: warning
+            team: identity-and-trust
+          annotations:
+            summary: "Denylist staleness approaching the 30s SLO ({{ $labels.cell }})"
+            description: "Gateway denylist snapshot age > 20s. Revocations take up to snapshot-age to reach the edge. Check identity-auth /v1/auth/denylist reachability + the poll loop. Runbook: docs/runbooks/key-rotation.md (denylist section)."
+        - alert: AuthRevocationLagCritical
+          expr: max(gateway_denylist_age_seconds) by (cell) > 30
+          for: 1m
+          labels:
+            severity: critical
+            team: identity-and-trust
+          annotations:
+            summary: "Revocation SLO breached — denylist > 30s stale ({{ $labels.cell }})"
+            description: "Revoked access tokens may still verify at the edge. The ≤30s D4 guarantee is violated. Escalate: identity-auth denylist endpoint down or the gateway poll loop wedged."
+
+    - name: auth-edge.jwks
+      rules:
+        # JWKS fetch failures blind the edge to key ROTATIONS (new-kid tokens
+        # can't verify). Signature checks on cached keys keep working, so this is
+        # a warning until it persists, then critical.
+        - alert: AuthJWKSFetchFailing
+          expr: sum(rate(gateway_jwks_fetch_failures_total[5m])) by (cell) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: identity-and-trust
+          annotations:
+            summary: "Gateway JWKS fetch failing ({{ $labels.cell }})"
+            description: "The edge cannot refresh JWKS from identity-auth. Cached keys still verify existing tokens, but a key rotation will not be picked up. Check identity-auth /.well-known/jwks.json."
+        - alert: AuthJWKSEmpty
+          expr: min(gateway_jwks_keys) by (cell) == 0 and on() (sum(rate(gateway_auth_requests_total[5m])) > 0)
+          for: 10m
+          labels:
+            severity: critical
+            team: identity-and-trust
+          annotations:
+            summary: "Gateway has NO verifying keys while auth traffic flows ({{ $labels.cell }})"
+            description: "JWKS cache is empty and bearer tokens are arriving — every authed request will 401. Identity-auth JWKS has been unreachable since before the edge warmed its cache."
+
+    - name: auth-edge.errors
+      rules:
+        # Auth error rate = fraction of bearer-token requests the edge rejects.
+        # A spike means a bad rotation, a clock-skew problem, or an attack. Note:
+        # this is DECOUPLED from identity-auth availability by design (D4) — an
+        # identity outage must NOT move this metric for already-issued tokens.
+        - alert: AuthEdgeRejectRateHigh
+          expr: |
+            sum(rate(gateway_auth_rejected_total[5m])) by (cell)
+              / clamp_min(sum(rate(gateway_auth_requests_total[5m])) by (cell), 1) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            team: identity-and-trust
+          annotations:
+            summary: "Edge auth reject rate > 5% ({{ $labels.cell }})"
+            description: "More than 5% of bearer-token requests are rejected (AUTH_TOKEN_INVALID/REVOKED). Suspect a botched key rotation, clock skew across cells, or credential-stuffing. Break down by error.code."
+        - alert: AuthEdgeVerifyLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(gateway_auth_verify_seconds_bucket[5m])) by (le, cell)) > 0.001
+          for: 10m
+          labels:
+            severity: warning
+            team: identity-and-trust
+          annotations:
+            summary: "Edge token verification p99 > 1ms ({{ $labels.cell }})"
+            description: "Local ES256 verification p99 exceeded the 1ms budget (D4). Investigate CPU saturation or JWKS cache thrash (unknown-kid refresh storms)."

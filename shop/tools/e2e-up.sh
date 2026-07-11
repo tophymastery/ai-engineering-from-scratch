@@ -35,6 +35,9 @@ echo "== building topology binaries =="
 for f in payment-sim map-sim notify-sink; do
   ( cd "$ROOT/services/fakes/$f" && "$GO" build -o "$BIN/$f" . )
 done
+# V-T1: prebuild the identity-auth slice binary so the identity slot's real_cmd
+# (tools/identity-realcmd.sh) execs it immediately when swapped to real.
+( cd "$ROOT/services/identity-auth" && "$GO" build -o "$BIN/identity-auth" . )
 E2ECTL="$BIN/e2ectl"
 export STUBGEN="$BIN/stubgen"
 
@@ -78,8 +81,13 @@ while IFS=$'\t' read -r name port mode contract real_cmd; do
 done < <("$E2ECTL" plan "$TOPO" "$OVERLAY")
 
 # Gateway: routes from the SAME resolved plan, one prefix per slot.
+# V-T1/D4: auth_jwt_edge defaults ON in the shared E2E env (the prod overlay ships
+# it OFF until rollout). With no bearer token presented the verifier is a no-op, so
+# all-stubs smoke stays green; when a token IS presented the gateway verifies it
+# locally against identity-auth's JWKS + polled denylist (DENYLIST_POLL, 5s here).
 "$E2ECTL" routes "$TOPO" "$OVERLAY" > "$RUN/routes.json"
 PORT="$GATEWAY_PORT" GATEWAY_ROUTES="$RUN/routes.json" GATEWAY_MODE="${GATEWAY_MODE:-dev}" \
+  FLAG_AUTH_JWT_EDGE="${FLAG_AUTH_JWT_EDGE:-true}" DENYLIST_POLL="${DENYLIST_POLL:-5s}" \
   "$BIN/gateway" > "$LOG/gateway.log" 2>&1 &
 echo $! > "$RUN/gateway.pid"
 

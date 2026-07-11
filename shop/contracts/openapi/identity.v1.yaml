@@ -1,20 +1,26 @@
-# identity.v1 — minimal S-T8 topology contract (01 §1 `identity`).
-# One resource (+ runtime /healthz from stubgen) so the shared E2E env can boot a
-# contract stub for identity until the V-T1 slice merges its real implementation.
-# Grows additively per D30 when that slice ships. Conventions (02 §1): /v1 paths,
-# snake_case fields, the 02 §2 error envelope on every non-2xx.
+# identity.v1 — accounts & sessions (01 §1 `identity`), implementing D4.
+# S-T8 shipped a minimal login stub (/v1/sessions); V-T1 GROWS IT ADDITIVELY
+# (D30: additive-only within a topic/version) with the real register/login/
+# refresh/revoke + denylist surface the identity-auth service serves.
+# Conventions (02 §1): /v1 paths, snake_case fields, the 02 §2 error envelope on
+# every non-2xx. Prefixed-ULID ids (usr_/ses_). ES256 access tokens (15 min);
+# opaque refresh tokens (server-side).
+#
+# Infra endpoints NOT modelled here (served at runtime, like /healthz):
+#   GET /.well-known/jwks.json   public keys the gateway caches (RFC 7517)
+#   POST /v1/auth/keys:rotate|:retire  ops-only key rotation (non-prod)
 openapi: 3.0.3
 info:
   title: identity
   version: "1.0.0"
-  description: Accounts & sessions (01 §1). Minimal E2E stub surface — login.
+  description: Accounts & sessions (01 §1). Register/login/refresh/revoke + edge denylist (D4).
 servers:
   - url: https://api.shop.io
 paths:
   /v1/sessions:
     post:
       operationId: create_session
-      summary: Login — exchange credentials for a session (register/login/refresh land in V-T1).
+      summary: Login (legacy S-T8 alias of /v1/auth/login) — exchange credentials for a session.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -40,6 +46,117 @@ paths:
                 expires_at: "2026-07-11T02:30:00Z"
         default:
           $ref: "#/components/responses/Error"
+
+  /v1/auth/register:
+    post:
+      operationId: register
+      summary: Create an account from email + password.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "201":
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegisteredUser" }
+              example: { user_id: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", email: "diner@example.com", role: "customer" }
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v1/auth/login:
+    post:
+      operationId: login
+      summary: Exchange credentials for an ES256 access token (15 min) + an opaque refresh token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "200":
+          description: Token pair issued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+              example:
+                access_token: "eyJhbGciOiJFUzI1NiIsImtpZCI6ImtfLi4uIn0.eyJzdWIiOiJ1c3JfLi4uIn0.sig"
+                refresh_token: "rft_01h8xgj2q7z9bq3m4n5p6r7s8t"
+                token_type: "Bearer"
+                expires_in: 900
+                expires_at: "2026-07-11T02:30:00Z"
+                user_id: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                session_id: "ses_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                role: "customer"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v1/auth/refresh:
+    post:
+      operationId: refresh
+      summary: Rotate the refresh token; the prior access token is revoked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string, example: "rft_01h8xgj2q7z9bq3m4n5p6r7s8t" }
+      responses:
+        "200":
+          description: New token pair (rotated).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v1/auth/revoke:
+    post:
+      operationId: revoke_session
+      summary: Revoke a session; its access-token jti is added to the edge denylist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string, example: "rft_01h8xgj2q7z9bq3m4n5p6r7s8t" }
+                jti: { type: string, example: "jti_01h8xgj2q7z9" }
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked, jti, denylist_version]
+                properties:
+                  revoked: { type: boolean }
+                  jti: { type: string }
+                  denylist_version: { type: integer, format: int64 }
+              example: { revoked: true, jti: "jti_01h8xgj2q7z9", denylist_version: 42 }
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v1/auth/denylist:
+    get:
+      operationId: get_denylist
+      summary: Bloom-filter revocation snapshot the gateway polls (≤30 s) to verify locally.
+      responses:
+        "200":
+          description: Bloom snapshot — base64 bitset + k/m params + monotonic version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DenylistSnapshot" }
+              example: { version: 42, k: 7, m: 65536, count: 3, bits: "AAAA...==" }
+        default:
+          $ref: "#/components/responses/Error"
 components:
   parameters:
     IdempotencyKey:
@@ -49,6 +166,42 @@ components:
       description: Client-generated ULID/UUID (02 §3).
       schema: { type: string }
   schemas:
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, example: "diner@example.com" }
+        password: { type: string, example: "correct horse battery staple" }
+        role: { type: string, description: "Optional; defaults to customer.", example: "customer" }
+    RegisteredUser:
+      type: object
+      required: [user_id, email, role]
+      properties:
+        user_id: { type: string }
+        email: { type: string }
+        role: { type: string }
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, expires_at, user_id, session_id, role]
+      properties:
+        access_token: { type: string, description: "ES256 JWT, 15-min TTL, kid header." }
+        refresh_token: { type: string, description: "Opaque; stored server-side as a hash." }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: "Access-token lifetime in seconds (900)." }
+        expires_at: { type: string, description: "RFC 3339 UTC access-token expiry." }
+        user_id: { type: string }
+        session_id: { type: string }
+        role: { type: string }
+        kid: { type: string, description: "Signing key id (present in the JWT header too)." }
+    DenylistSnapshot:
+      type: object
+      required: [version, k, m, count, bits]
+      properties:
+        version: { type: integer, format: int64, description: "Monotonic; bumps on every revocation." }
+        k: { type: integer, description: "Number of bloom hash probes." }
+        m: { type: integer, description: "Bloom bit count." }
+        count: { type: integer, format: int64, description: "jtis added." }
+        bits: { type: string, description: "base64(std) of the m/8-byte bitset." }
     Session:
       type: object
       required: [session_id, user_id, access_token, expires_at]
@@ -84,7 +237,7 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
           example:
             error:
-              code: "UNAUTHENTICATED"
-              message: "Invalid credentials."
+              code: "AUTH_INVALID_CREDENTIALS"
+              message: "Email or password is incorrect."
               trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
               retryable: false

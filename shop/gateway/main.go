@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -25,8 +26,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shop-platform/shop/libs/flags"
 	"github.com/shop-platform/shop/libs/testhooks"
 )
+
+// bffsWithAuthPassthrough are the BFF prefixes whose /v1/auth/* paths the
+// gateway routes DIRECTLY to identity-auth (V-T1 req 3). The E2E BFF slots are
+// contract stubs today; a BFF slice will own richer auth flows later, at which
+// point it fronts identity itself and these passthroughs are removed. Documented
+// in contracts/openapi/{customer,driver}-bff.v1.yaml.
+var bffsWithAuthPassthrough = []string{"customer-bff", "driver-bff"}
 
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
@@ -88,12 +97,43 @@ func main() {
 		log.Printf("route %s -> %s", prefix, rt.Upstream)
 	}
 
+	// --- V-T1 / D4 edge auth wiring ---
+	// identity-auth is the JWKS + denylist source; discover its upstream from the
+	// route table so no extra config is needed (stable per-slot port survives the
+	// stub->real swap). When present, register the BFF /v1/auth/* passthroughs.
+	identityBase := upstreamFor(routes, "/identity/")
+	for _, bff := range bffsWithAuthPassthrough {
+		bffPrefix := "/" + bff + "/"
+		if identityBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		idURL, err := url.Parse(identityBase)
+		if err != nil {
+			log.Fatalf("bad identity upstream %q: %v", identityBase, err)
+		}
+		// A more specific pattern than the generic BFF route: ServeMux longest-
+		// prefix match sends /{bff}/v1/auth/* here, everything else to the stub.
+		authProxy := httputil.NewSingleHostReverseProxy(idURL)
+		mux.Handle(bffPrefix+"v1/auth/", http.StripPrefix("/"+bff, authProxy))
+		log.Printf("auth passthrough %sv1/auth/* -> %s (identity-auth)", bffPrefix, identityBase)
+	}
+
+	flagSet := flags.FromEnv()
+	authEnabled := flagSet.Bool("auth_jwt_edge", false)
+	pollEvery := envDuration("DENYLIST_POLL", 5*time.Second)
+	auth := newEdgeAuth(authEnabled && identityBase != "", identityBase, pollEvery)
+	auth.start(context.Background())
+	log.Printf("edge auth: enabled=%v identity=%q denylist_poll=%s", auth.enabled, identityBase, pollEvery)
+
 	// Middleware chain (outermost first):
-	//   stripBackdoors(mode) -> testhooks.Middleware -> mux
+	//   stripBackdoors(mode) -> auth.middleware -> testhooks.Middleware -> mux
 	// Strip runs first so that even a mis-built (testhooks-tagged) binary
 	// running in prod mode has the headers removed before anything reads them.
+	// Auth runs next: it strips spoofed identity headers ALWAYS and verifies a
+	// presented bearer token locally (D4 — no call to identity on the hot path).
 	var handler http.Handler = mux
 	handler = testhooks.Middleware(handler)
+	handler = auth.middleware(handler)
 	handler = stripBackdoors(mode, handler)
 
 	addr := ":" + port
@@ -186,6 +226,26 @@ func selfCheck(u string) {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// upstreamFor returns the upstream URL registered for an exact route prefix.
+func upstreamFor(routes []route, prefix string) string {
+	for _, rt := range routes {
+		if rt.Prefix == prefix {
+			return rt.Upstream
+		}
+	}
+	return ""
+}
+
+// envDuration reads a Go duration (e.g. "5s") from an env var, else def.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return def
 }

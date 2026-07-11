@@ -29,10 +29,10 @@ got="$(printf '%s\n' 'services/_placeholder/main.go' | "$CP" --stdin)"
 check "service-only change" "$got" "services/_placeholder"
 
 # Case 2: libs change => all buildable paths (sorted). S-T7 added the fake
-# providers (services/fakes) and the TS factory mirror (bffs/factories-ts), so a
-# shared-lib change now fans out to those too.
+# providers (services/fakes) and the TS factory mirror (bffs/factories-ts); V-T1
+# added services/identity-auth — a shared-lib change fans out to all of them.
 got="$(printf '%s\n' 'libs/errors/errors.go' | "$CP" --stdin)"
-want="$(printf '%s\n' 'bffs/factories-ts' 'gateway' 'services/_placeholder' 'services/fakes' | sort -u)"
+want="$(printf '%s\n' 'bffs/factories-ts' 'gateway' 'services/_placeholder' 'services/fakes' 'services/identity-auth' | sort -u)"
 check "libs change = all" "$got" "$want"
 
 # Case 3: docs-only change => nothing.

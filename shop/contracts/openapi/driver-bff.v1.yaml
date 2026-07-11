@@ -49,6 +49,67 @@ paths:
                 at: "2026-07-11T02:58:00Z"
         default:
           $ref: "#/components/responses/Error"
+
+  # --- V-T1 auth passthroughs (D4). Drivers register/log in/refresh through the
+  # driver BFF. Today the GATEWAY routes /driver-bff/v1/auth/* directly to
+  # identity-auth (the BFF slot is a contract stub); a driver-bff slice will own
+  # richer flows later. Additive-only (D30).
+  /v1/auth/register:
+    post:
+      operationId: driver_register
+      summary: Register a driver account (passthrough to identity-auth).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "201":
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegisteredUser" }
+              example: { user_id: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", email: "rider@example.com", role: "driver" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/auth/login:
+    post:
+      operationId: driver_login
+      summary: Log in (passthrough to identity-auth) — returns an access+refresh token pair.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "200":
+          description: Token pair.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/auth/refresh:
+    post:
+      operationId: driver_refresh
+      summary: Rotate the refresh token (passthrough to identity-auth).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string, example: "rft_01h8xgj2q7z9bq3m4n5p6r7s8t" }
+      responses:
+        "200":
+          description: New (rotated) token pair.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        default:
+          $ref: "#/components/responses/Error"
 components:
   parameters:
     OrderId:
@@ -63,6 +124,33 @@ components:
       description: Client-generated ULID/UUID (02 §3).
       schema: { type: string }
   schemas:
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, example: "rider@example.com" }
+        password: { type: string, example: "correct horse battery staple" }
+        role: { type: string, example: "driver" }
+    RegisteredUser:
+      type: object
+      required: [user_id, email, role]
+      properties:
+        user_id: { type: string }
+        email: { type: string }
+        role: { type: string }
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, expires_at, user_id, session_id, role]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer }
+        expires_at: { type: string }
+        user_id: { type: string }
+        session_id: { type: string }
+        role: { type: string }
+        kid: { type: string }
     TripEvent:
       type: object
       required: [order_id, status]

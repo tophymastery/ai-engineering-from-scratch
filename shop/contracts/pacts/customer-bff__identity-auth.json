@@ -1,0 +1,36 @@
+{
+  "consumer": { "name": "customer-bff" },
+  "provider": { "name": "identity-auth" },
+  "metadata": {
+    "note": "V-T1 pact: the customer BFF's auth passthrough consumes identity-auth's register + login. File-based broker (see contracts/pacts/customer-bff__placeholder.json) — registryctl pact-verify REPLAYS each interaction against the REAL identity-auth service (booted by ci/pact-verify.sh) and asserts status + response shape. Provider state for the login interaction: user pact-login@example.com is pre-registered by the verify harness. Token/id values are non-deterministic so only stable scalars (token_type, expires_in, role, email) are pinned; presence of the token keys is covered by the service's own unit tests.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "register a new customer account",
+      "request": {
+        "method": "POST",
+        "path": "/v1/auth/register",
+        "headers": { "Content-Type": "application/json" },
+        "body": { "email": "pact-register@example.com", "password": "hunter2pass" }
+      },
+      "response": {
+        "status": 201,
+        "body": { "email": "pact-register@example.com", "role": "customer" }
+      }
+    },
+    {
+      "description": "login returns a 15-minute bearer session",
+      "request": {
+        "method": "POST",
+        "path": "/v1/auth/login",
+        "headers": { "Content-Type": "application/json" },
+        "body": { "email": "pact-login@example.com", "password": "hunter2pass" }
+      },
+      "response": {
+        "status": 200,
+        "body": { "token_type": "Bearer", "expires_in": 900, "role": "customer" }
+      }
+    }
+  ]
+}
