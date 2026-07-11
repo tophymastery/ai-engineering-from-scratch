@@ -4,7 +4,7 @@
 openapi: 3.0.3
 info:
   title: customer-bff
-  version: "1.0.0"
+  version: "1.1.0"
   description: Customer BFF — home feed + order detail aggregation (02 §4.2).
 servers:
   - url: https://api.shop.io
@@ -161,6 +161,62 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Cart" }
+        default:
+          $ref: "#/components/responses/Error"
+
+  # --- V-T8 quotes passthroughs (D10). The customer app prices its cart + checks
+  # out a signed quote through the BFF. As with the cart passthroughs, today the
+  # GATEWAY routes /customer-bff/v1/quotes* DIRECTLY to the pricing-promo slot
+  # (gateway/main.go bffsWithQuotesPassthrough). Same discover-from-route-table
+  # lifecycle; pricing_v1 is resolved inside pricing-promo. See
+  # contracts/openapi/pricing-promo.v1.yaml. ---
+  /v1/quotes:
+    post:
+      operationId: create_quote_via_bff
+      summary: Price the customer's cart (passthrough to pricing-promo) — returns a signed quote (10-min TTL).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cart_id]
+              properties:
+                cart_id: { type: string, example: "crt_01H8XGJ2Q" }
+                voucher_code: { type: string, example: "LUNCH25" }
+                delivery_location:
+                  type: object
+                  properties:
+                    lat: { type: number }
+                    lng: { type: number }
+      responses:
+        "201":
+          description: Signed quote (typed fees[]/discounts[] + total).
+          content:
+            application/json:
+              schema: { type: object }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/quotes/{quote_id}:checkout:
+    post:
+      operationId: checkout_quote_via_bff
+      summary: Consume a signed quote at checkout (passthrough to pricing-promo) — tampered/expired ⇒ 422.
+      parameters:
+        - name: quote_id
+          in: path
+          required: true
+          schema: { type: string, example: "qot_01H8XGJ2Q" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Quote verified + persisted.
+          content:
+            application/json:
+              schema: { type: object }
         default:
           $ref: "#/components/responses/Error"
   /v1/customer/orders/{order_id}:

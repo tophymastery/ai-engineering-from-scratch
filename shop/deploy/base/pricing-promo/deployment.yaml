@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pricing-promo
+  labels:
+    app: pricing-promo
+    shop.io/team: growth
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pricing-promo
+  template:
+    metadata:
+      labels:
+        app: pricing-promo
+        shop.io/team: growth
+    spec:
+      containers:
+        - name: pricing-promo
+          image: shop/pricing-promo:latest
+          ports:
+            - containerPort: 8107
+          env:
+            - name: PORT
+              value: "8107"
+            - name: SERVICE_NAME
+              value: "pricing-promo"
+            - name: ENV
+              value: "prod"
+            - name: REGION
+              value: "bkk"
+            # pricing_v1 ships dark (04 §1.3 / 03 §5). The staging/preview overlays
+            # flip it on; prod is enabled via a canary-gated rollout.
+            - name: FLAG_PRICING_V1
+              value: "false"
+            # Cart origin for the subtotal read when a quote request omits an
+            # explicit subtotal (the pricing-promo->cart pact). Stable per-slot DNS.
+            - name: CART_URL
+              value: "http://cart:8104"
+            # Quotes live in the Redis-like tier for 10 min (D10); HMAC-signed.
+            - name: QUOTE_TTL
+              value: "10m"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8107
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8107
+            initialDelaySeconds: 2
+            periodSeconds: 10

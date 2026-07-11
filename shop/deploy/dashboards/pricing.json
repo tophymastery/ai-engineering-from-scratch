@@ -1,0 +1,78 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T8 pricing-promo slice (D10). Panels bind to the metrics pricing exports (also driving deploy/alerts/pricing.yaml): quote latency (p99 < 300ms budget), the tampered/expired-quote 422 rejection path, the Redis-like TTL tier hit/miss mix, PG writes (checkout-only invariant), signing-key age (rotation), and RED per route. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Pricing — Quotes, typed fees/discounts, HMAC integrity & checkout-only PG (V-T8)",
+  "uid": "pricing-v-t8",
+  "tags": ["growth", "pricing", "quotes", "hmac", "surge", "D10", "V-T8"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(pricing_requests_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Quote latency p99 (SLO < 300ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.2 }, { "color": "red", "value": 0.3 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(pricing_request_duration_seconds_bucket{route=~\"/v1/quotes.*\",region=~\"$region\"}[5m])) by (le, route))", "legendFormat": "{{route}} p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Quote integrity — checkout outcomes (verified vs 422 tampered/expired)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(pricing_requests_total{route=~\".*checkout.*\",code=\"200\",region=~\"$region\"}[5m]))", "legendFormat": "verified checkouts/s" },
+        { "expr": "sum(rate(pricing_requests_total{route=~\".*checkout.*\",code=\"422\",region=~\"$region\"}[5m]))", "legendFormat": "422 tampered/expired/s" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Redis-like TTL tier — quote cache hits vs misses (10-min TTL)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(pricing_quote_cache_hits_total{region=~\"$region\"}[5m]))", "legendFormat": "cache hits/s" },
+        { "expr": "sum(rate(pricing_quote_cache_misses_total{region=~\"$region\"}[5m]))", "legendFormat": "cache misses/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "PG persistence (D10 invariant: writes ONLY at checkout, ~1/50th of quotes)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "wps" } },
+      "targets": [
+        { "expr": "sum(rate(pricing_requests_total{route=\"/v1/quotes\",code=\"201\",region=~\"$region\"}[5m]))", "legendFormat": "quotes created/s (no PG write)" },
+        { "expr": "sum(rate(pricing_quote_pg_writes_total{region=~\"$region\"}[5m]))", "legendFormat": "PG quote writes/s (checkout only)" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Signing-key age (rotation) — days since primary key created",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 2592000 } ] } } },
+      "targets": [
+        { "expr": "time() - pricing_primary_key_created_timestamp_seconds", "legendFormat": "primary key age" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Pricing API outcome rate (RED per route)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(pricing_requests_total{region=~\"$region\"}[5m])) by (route, code)", "legendFormat": "{{route}} {{code}}" }
+      ]
+    }
+  ]
+}

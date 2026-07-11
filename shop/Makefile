@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf render-feed-cache render-cart e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf render-feed-cache render-cart render-pricing e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -40,6 +40,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/ranking && $(GO) build ./...
 	@cd services/feed-cache && $(GO) build ./...
 	@cd services/cart && $(GO) build ./...
+	@cd services/pricing-promo && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -131,6 +132,12 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@cd services/cart && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@echo "== V-T7 perf criteria (no -race): cart ops add/get/remove p99<100ms + concurrency burst =="
 	@$(MAKE) --no-print-directory test-cart-perf
+	@echo "== V-T8 pricing-promo (D10, -race): deterministic pricing math (byte-identical) + HMAC-signed quotes tamper/expiry=>422 (1000/1000) + key-rotation rehearsal + PG-only-at-checkout (row-count) + typed fees[]/discounts[] + contract-conformant + flag =="
+	@cd services/pricing-promo && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T8 perf criteria (no -race; race instrumentation invalidates latency): quote p99<300ms + concurrency burst =="
+	@$(MAKE) --no-print-directory test-pricing-perf
+	@echo "== V-T8 key-rotation LIVE rehearsal (real pricing-promo: add B -> overlap A still verifies -> retire A) =="
+	@bash tools/rotate-quote-keys-demo.sh
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -229,6 +236,9 @@ test-feedcache-perf: ## V-T6: feed-cache perf criteria (no -race): 1M-request co
 test-cart-perf: ## V-T7: cart perf criteria (no -race): add/get/remove p99<100ms + concurrency burst
 	@cd services/cart && $(GO) test -count=1 -run TestPerf ./...
 
+test-pricing-perf: ## V-T8: pricing perf criteria (no -race): quote p99<300ms + concurrency burst
+	@cd services/pricing-promo && $(GO) test -count=1 -run TestPerf ./...
+
 render-search: ## V-T4/D17: render the search base (search-query+search-indexer Deployments/Services + per-cell OpenSearch data/ingest StatefulSets) + lint the search alerts/dashboard
 	@set -e; root=$$PWD; f=$$root/.render-search.yaml; \
 	  $(KUSTOMIZE) build deploy/base/search > $$f; \
@@ -270,6 +280,16 @@ render-cart: ## V-T7: render the cart base (Deployment+Service) + lint the cart 
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/cart.yaml && $(GO) run . $$root/deploy/dashboards/cart.json ); \
 	  echo "render-cart: cart base (Deployment+Service) + latency/revalidation/snapshot alerts + dashboard rendered/parsed"
+
+render-pricing: ## V-T8: render the pricing-promo base (Deployment+Service) + lint the pricing latency/integrity/persistence alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-pricing.yaml; \
+	  $(KUSTOMIZE) build deploy/base/pricing-promo > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: pricing-promo' $$f || { echo "render-pricing: pricing-promo Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-pricing: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/pricing.yaml && $(GO) run . $$root/deploy/dashboards/pricing.json ); \
+	  echo "render-pricing: pricing-promo base (Deployment+Service) + latency/integrity/persistence alerts + dashboard rendered/parsed"
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
 	@ci/backdoor-scan.sh

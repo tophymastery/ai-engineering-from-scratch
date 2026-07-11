@@ -54,7 +54,12 @@ services:
   - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "bash tools/cart-realcmd.sh" }
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }
-  - { name: pricing-promo,     port: 8107, mode: stub, contract: contracts/openapi/pricing-promo.v1.yaml,     real_cmd: "" }
+  # pricing-promo is the V-T8 slice (D10): real_cmd boots the built binary
+  # (tools/pricing-realcmd.sh, pricing_v1 on; CART_URL->cart slot for the
+  # subtotal read, the pricing-promo->cart pact). `make e2e-sync` promotes it
+  # stub->real once the binary builds. The gateway routes /customer-bff/v1/quotes*
+  # here (quotes passthrough).
+  - { name: pricing-promo,     port: 8107, mode: stub, contract: contracts/openapi/pricing-promo.v1.yaml,     real_cmd: "bash tools/pricing-realcmd.sh" }
   - { name: dispatch,          port: 8108, mode: stub, contract: contracts/openapi/dispatch.v1.yaml,          real_cmd: "" }
   - { name: location-tracking, port: 8109, mode: stub, contract: contracts/openapi/location-tracking.v1.yaml, real_cmd: "" }
   - { name: notification,      port: 8110, mode: stub, contract: contracts/openapi/notification.v1.yaml,      real_cmd: "" }

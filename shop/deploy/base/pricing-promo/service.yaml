@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricing-promo
+  labels:
+    app: pricing-promo
+    shop.io/team: growth
+spec:
+  selector:
+    app: pricing-promo
+  ports:
+    - name: http
+      port: 8107
+      targetPort: 8107

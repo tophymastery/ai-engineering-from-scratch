@@ -1,4 +1,4 @@
-# Verification (S-T1–S-T8, V-T1–V-T7)
+# Verification (S-T1–S-T8, V-T1–V-T8)
 
 How each Definition-of-Done item and test criterion was verified **in this
 environment**, and where the environment forced an adaptation. Legend:
@@ -1473,3 +1473,151 @@ make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down   # add->get ETa
    and ON in the e2e realcmd — the flag gates the whole mutating surface (reads of
    an existing cart still work; adds/removes return 404 CART_DISABLED when dark).
    Per-request `X-Flag-Override` is honoured only in non-prod builds (testhooks).
+
+# V-T8 Verification (Pricing & quotes slice — D10: quote engine, HMAC-signed quotes in a Redis-like 10-min TTL tier, PG persistence only at checkout, typed fees[]/discounts[])
+
+One service — `pricing-promo` (Growth team, port 8107) — is the quote engine. It
+prices a cart into **items + typed `fees[]`** (DELIVERY, SERVICE, SURGE) **+ typed
+`discounts[]`** (PROMO, VOUCHER) → total, all in **integer minor units + ISO
+currency** (02 §1 / §5; never floats), and returns an **HMAC-signed** quote with a
+**10-min TTL** via `POST /v1/quotes`. The live quote lives in a **Redis-like TTL
+tier**; **PG persistence happens only at checkout** (`POST /v1/quotes/{id}:checkout`),
+which re-verifies the signed quote (**tampered/expired ⇒ 422**) before writing
+exactly one durable row. It **consumes the cart contract** (GET /v1/carts/{id},
+the `pricing-promo → cart` pact) for the authoritative subtotal when a request
+omits an explicit one. Same environment realities as V-T1–V-T7 (no Docker daemon
+→ process-mode E2E; no K8s → manifests render-only; **no Redis daemon → an
+in-process TTL store with the same fresh/miss semantics stands in for the quote
+tier**; **no PG → in-memory SQLite in tests, production schema shipped**). **Every
+correctness property — deterministic pricing math (byte-identical), tamper/expiry
+⇒ 422 on 100% of a 1000-mutation sweep, PG-writes-only-at-checkout (row-count),
+key-rotation overlap — runs for real under `-race`;** only raw throughput scale is
+adapted and disclosed per row.
+
+## What "HMAC-signed quotes" + "PG only at checkout" mean here (FULL correctness)
+
+The quote is signed over a **canonical byte encoding** (fixed field order, not JSON
+map order) of every economically-meaningful field — quote_id, cart_id, currency,
+subtotal, every fee/discount line, total, issued/expiry — keyed by a rotating HMAC
+key identified by `kid`. **Signing** always uses the ring's `primary` key;
+**verification** accepts any key still in the ring (so a quote signed by the
+outgoing key keeps verifying through the ≥10-min overlap). A **tampered** quote
+(any mutated amount / line item / cart binding / expiry-extension) changes the
+canonical bytes ⇒ the HMAC no longer matches ⇒ **422 QUOTE_INVALID**; an **expired**
+quote (authentic signature, signed `expires_at` in the past on a frozen clock) ⇒
+**422 QUOTE_EXPIRED**; an unknown/retired `kid` ⇒ **422**. **`POST /v1/quotes`
+writes ZERO rows** to the durable `quotes` table (the quote lives only in the
+Redis-like tier); the **checkout** path is the sole writer and is **idempotent on
+quote_id**. This is the real mechanism, run under `-race` on every CI pass, and
+also proven end-to-end through the customer-bff in the shared E2E env.
+
+## Store / signing adaptations (disclosed)
+
+The **"Redis" 10-min TTL tier is an in-process `quoteCache`** (`store.go`) — no
+daemon in this sandbox — implementing the same fresh/miss TTL contract a Redis
+`SET quote:<id> <json> EX 600` gives, read under the injected Clock. The **PG store
+is in-memory SQLite** (modernc, pure-Go) in tests; the production schema is
+`migrations/0001_pricing.pg.sql` (the checkout-only INSERT … ON CONFLICT is
+engine-agnostic). **HMAC keys are generated in-process** and rotated via the admin
+endpoints; a production deployment loads seed secrets from the per-cell secret
+store keyed by `kid` (see the runbook). Surge windows + expiry are driven by an
+**injected clock** (frozen in tests; `X-Test-Clock` honoured in non-prod E2E). The
+**10k RPS** scale is adapted: per-quote p99 is **full** (real, measured), a literal
+sustained 10k RPS is not reachable in-sandbox, so throughput is proven by per-op
+p99 + a 64-client concurrency burst.
+
+## DoD / test-criteria matrix
+
+| # | V-T8 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `pricing_v1` on) | **full (adapted boot)** | `make e2e-sync` swaps `pricing-promo` → real (pricing_v1 on via `tools/pricing-realcmd.sh`; `CART_URL`→cart slot); `make e2e-up` boots 22 slots (8 real incl. pricing-promo) + gateway; `make e2e-smoke` runs **90/90** incl. **10 new V-T8 assertions [81–90] through the customer-bff passthrough**: seed a catalog item + cart → **quote priced from the REAL cart** (subtotal 16000 read via the pricing-promo→cart pact) → **typed fees[] (DELIVERY + SERVICE)** → **typed discounts[] (VOUCHER −2500)** → **total 17000** → **HMAC-signed (kid + signature)** → **clean checkout ⇒ 200** → **TAMPERED quote ⇒ 422 QUOTE_INVALID**. Gateway routes `/customer-bff/v1/quotes*` → pricing-promo. Process-mode boot (no Docker). V-T8 deep section skips unless pricing-promo+cart+merchant-catalog are all real (all-stubs / partial-mix smoke unaffected). |
+| DoD-2 | Four test levels green (unit/contract/integration/E2E); pricing math deterministically unit-tested | **full** | **Unit/integration:** `services/pricing-promo` `go test -race` (17 tests): deterministic fixtures + byte-identical reruns, surge-window boundaries, tamper/expiry 1000-sweep, checkout tamper/expiry 422, key-rotation rehearsal, PG-only-at-checkout row counts, TTL-expiry, flag gate, cart consumption, get-quote. **Contract:** `pricing-promo.v1.yaml` grown additively (1.0.0→1.1.0: GET + checkout + signed-integrity Quote fields) + customer-bff quotes paths, both pass `registryctl validate` (22 OpenAPI OK); the produced quote is validated against the published `Quote` schema (`TestProducedQuoteConformsToContract`), the consumed cart shape against the pact (`TestConsumedCartPactShape`). **Integration:** `ci/pact-verify.sh` verifies `pricing-promo → cart` against the REAL cart. **E2E:** the e2e-smoke section above. |
+| DoD-2b | Consumes cart contract stubs (prices against cart) | **full (file-based broker)** | `contracts/pacts/pricing-promo__cart.json` (subtotal read) verified by `registryctl pact-verify` **against the REAL cart** booted by `ci/pact-verify.sh` (cart seeded with 2×8000 = 16000 THB via the real catalog) — **pricing-promo 1/1 PASS**. In the E2E env a quote with no explicit subtotal fetches the real cart's subtotal (smoke [83]). |
+| DoD | Dashboards + alerts live; SLO + runbook + `ownership.yaml`; key-rotation runbook | **full (alerts/dash render-only)** | `deploy/alerts/pricing.yaml` (quote-p99, checkout 422-rate, signing-key age, PG-write-rate invariant) + `deploy/dashboards/pricing.json` — both parsed by `make render-pricing`; `deploy/base/pricing-promo` (Deployment+Service) renders via kustomize. `docs/runbooks/pricing.md` (SLOs + invariants + alert actions) **and `docs/runbooks/quote-key-rotation.md`** (the HMAC rotation runbook: publish-before-sign, ≥10-min overlap, retire-after). `ownership.yaml`: `pricing-promo → Growth, V-T8` (already present, verified correct). |
+| Test | Tampered/expired quote ⇒ 422 on 100% of fixtures | **full** | `TestTamperExpired_1000` (`-race`): **1000 deterministic mutations** (signature bit-flip, total/fee tamper, expiry-extension, cart-rebind, forged/unknown kid, signature truncation, authentic-but-expired) → **1000/1000 = 100% rejected** (875 QUOTE_INVALID + 125 QUOTE_EXPIRED), **0 accepted**. HTTP-level: `TestCheckoutTamper_HTTP_422` (mutated total ⇒ **422 QUOTE_INVALID**, **0 PG rows**), `TestCheckoutExpired_HTTP_422` (frozen clock advanced past the 10-min TTL ⇒ **422 QUOTE_EXPIRED**, **0 PG rows**). E2E [89–90]: tampered quote through the customer-bff ⇒ **422 QUOTE_INVALID**. Mirrors V-T1's 1000/1000 forgery rigor. |
+| Test | Quote p99 < 300 ms at 10k RPS | **adapted (throughput) / full (latency)** | Real per-quote latency through the full HTTP+engine+sign+cache path (`TestPerf_QuoteP99`, no -race): **p99 = 77 µs** over 3000 quotes (p50 = 9 µs) — ≪ 300 ms. Concurrent **burst** (64 clients × 60 = 3840 quotes): **p99 ≈ 8.3 ms** < 300 ms. Checkout (verify+persist) p99 = **236 µs**. Scale adaptation: a literal sustained 10k RPS is unreachable in this sandbox (single-process, in-memory SQLite/quoteCache), so the budget is proven by measured per-op p99 + a contended burst, not a 10k-RPS soak (the V-T31 load harness fills that seam). Numbers NOT fabricated — printed by the test. |
+| Test | PG quote writes occur only at checkout (integration assertion) | **full** | `TestPGWritesOnlyAtCheckout` (`-race`): **5 `POST /v1/quotes` ⇒ `SELECT COUNT(*) FROM quotes` = 0** (quote-cache has 5 entries); **1 checkout ⇒ 1 row**; a 2nd distinct checkout ⇒ 2 rows; **re-checkout the first (double-tap) ⇒ still 2 rows** (idempotent on quote_id). `TestQuoteCacheTTLExpiry`: a quote expires from the Redis-like tier at the 10-min horizon (GET ⇒ 404) with **0 PG rows** (no checkout occurred). Real DB-row-count assertions. |
+| Test | Deterministic pricing math (frozen clock, seeded inputs, byte-identical) | **full** | `TestPricingFixtures` (`-race`): 6 frozen-clock fixtures with EXACT typed fees[]/discounts[]/total (off-peak vs lunch/dinner surge, percent promo vs fixed voucher, voucher-capped-at-subtotal, service-fee floor, unknown-code-ignored) — all integer minor units. `TestPricingDeterministic_ByteIdentical`: the same inputs **1000× ⇒ byte-identical** marshalled output. `TestSurgeWindowBoundaries`: surge-window edges pinned. |
+| Test | Key-rotation runbook + rotation rehearsal (overlap) | **full** | `TestKeyRotationRunbook` (`-race`): sign under key A → rotate to B (new quotes signed with B) → **A-signed quote STILL verifies during the overlap** → retire A → **A-signed quote no longer verifies, B still does**; retire refuses to drop the last key. **LIVE** rehearsal `tools/rotate-quote-keys-demo.sh` against the REAL pricing-promo (**13/13** assertions: add B → ring holds A+B → overlap A verifies → retire A → A-signed quote ⇒ 422, B-signed ⇒ 200 + checks out), wired into `make test`. Mirrors V-T1's rotation rehearsal. |
+| Test | `pricing_v1` flag gates the endpoint; e2e runs with it on | **full** | `TestFlagGate`: with `pricing_v1` off, `POST /v1/quotes` ⇒ **404 PRICING_DISABLED** (ships dark). E2E realcmd forces `FLAG_PRICING_V1=true`; the prod overlay ships it OFF. Per-request `X-Flag-Override` honoured only in non-prod (testhooks). |
+
+## Measured numbers
+
+| Metric | Value |
+|---|---|
+| pricing-promo `go test -race` | ok (17 tests, incl. 1000-mutation tamper/expiry sweep + PG-only-at-checkout row counts + rotation rehearsal + deterministic fixtures) |
+| Tamper/expiry → 422 fixture sweep | **1000 mutations → 1000 rejected = 100%** (875 QUOTE_INVALID + 125 QUOTE_EXPIRED, 0 accepted) |
+| Deterministic math | **byte-identical over 1000 reruns** (e.g. lunch surge + PROMO10: fees DELIVERY 1900 + SERVICE 4123 + SURGE 950, discount PROMO −4123, total 44084) |
+| PG-only-at-checkout | 5× `POST /v1/quotes` → **0 rows**; 1 checkout → **1 row**; double-tap re-checkout → **still 1** (idempotent) |
+| Quote p99 (3000 quotes) | **77 µs** (p50 9 µs; budget 300 ms) |
+| Quote p99 under burst (64 clients × 60) | **≈ 8.3 ms** (budget 300 ms) |
+| Checkout p99 (verify+persist, 2000) | **236 µs** (budget 300 ms) |
+| Key-rotation rehearsal (unit) | A signs → rotate B → A verifies in overlap → retire A → A ⇒ 422, B ⇒ 200 |
+| Key-rotation rehearsal (LIVE, real service) | `rotate-quote-keys-demo.sh` **13/13** GREEN |
+| Contract validate | pricing-promo.v1.yaml (1.1.0) + customer-bff quotes paths OK (22 OpenAPI) |
+| Pact | pricing-promo → cart **1/1** vs the REAL cart |
+| Kustomize render | `make render-pricing` → 2 docs (Deployment+Service) + alerts + dashboard, yamlcheck OK |
+| E2E smoke | **90/90** (10 new V-T8 assertions via customer-bff); V-T1–V-T7 stay green; all-stubs unaffected (V-T8 deep section skips unless pricing+cart+catalog real) |
+| Full `./ci/run-local.sh` | **exit 0** (V-T8 wired into make test, build, contract-validate, pact-verify, render-pricing, e2e-smoke) |
+
+## Commands to reproduce
+
+```
+cd services/pricing-promo && go test -race -count=1 ./...        # deterministic math + tamper/expiry 1000-sweep + PG-only-at-checkout + rotation + contract-conformant
+cd services/pricing-promo && go test -count=1 -run TestPerf ./... # perf criteria (no -race): quote p99 + burst + checkout p99
+bash tools/rotate-quote-keys-demo.sh   # LIVE key-rotation rehearsal (add B -> overlap A verifies -> retire A) 13/13
+make contract-validate       # pricing-promo.v1 (1.1.0) + customer-bff quotes paths
+make pact-verify             # pricing-promo -> cart pact vs the REAL cart
+make render-pricing          # pricing-promo base (Deployment+Service) + alerts + dashboard
+make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down   # quote from real cart -> typed fees/discounts -> checkout 200 -> tampered 422 (90/90)
+./ci/run-local.sh            # FULL pipeline incl. all V-T8 gates — exits 0
+```
+
+## Deviations summary (V-T8)
+
+1. **10k RPS sustained → per-op p99 + contended burst.** Throughput scale is
+   adapted (single-process, in-memory SQLite/quoteCache); the *latency* is real and
+   measured (quote p99 77 µs, burst ≈ 8.3 ms, checkout 236 µs — all ≪ 300 ms). The
+   literal 10k-RPS soak is the seam a load harness (V-T31) fills; the per-op budget
+   is met with wide margin. Correctness (100% tamper/expiry→422, PG-only-at-checkout,
+   deterministic math, rotation) is FULL.
+2. **"Redis" 10-min TTL tier → in-process `quoteCache`.** No Redis daemon
+   in-sandbox; the store implements the same fresh/miss TTL contract under the
+   injected Clock. The put/get/TTL-expiry logic is real and tested.
+3. **PG store is in-memory SQLite** (modernc, pure-Go); the production schema is
+   `migrations/0001_pricing.pg.sql`. The checkout-only INSERT … ON CONFLICT DO
+   NOTHING (idempotent on quote_id) is engine-agnostic; the row-count assertions
+   (quote=0, checkout=1) run for real.
+4. **HMAC keys generated in-process, rotated via admin endpoints.** A production
+   deployment loads seed secrets from the per-cell secret store keyed by `kid`
+   (documented in `docs/runbooks/quote-key-rotation.md`); the ring mechanics
+   (primary-signs / ring-verifies, rotate-cap-2, retire-refuse-primary/last) and
+   the overlap window are real, tested under `-race`, and rehearsed live.
+5. **Quote request `subtotal` is an additive optional field (02 §5).** A BFF that
+   already holds the cart total may pass it to skip the cart round-trip; when absent,
+   pricing consumes the cart contract (the pricing-promo→cart pact). Both paths are
+   tested; the E2E deep section exercises the real cart-consumption path.
+
+## Key invariants (V-T8)
+
+1. **Deterministic pricing math.** fees/discounts/total are integer minor units
+   only (never floats); surge is a pure function of the quote's issue time (frozen
+   clock reproduces it). Same inputs + rate config ⇒ byte-identical quote.
+2. **Quotes are HMAC-signed over a canonical body + expiry.** Any tamper (amount,
+   line item, cart binding, expiry-extension) breaks the HMAC ⇒ 422; an
+   authentic-but-expired quote ⇒ 422; an unknown/retired kid ⇒ 422. 422 is the
+   *correct rejection* of an invalid quote — not a server error, not a charge.
+3. **PG is written ONLY at checkout.** `POST /v1/quotes` writes nothing durable;
+   the quote lives in the Redis-like 10-min TTL tier. ~99% of quotes are never
+   checked out, so the `quotes` table sees ~1/50th of pricing's volume (D10). A
+   Redis flush merely forces a re-quote; it never loses a durable row.
+4. **Checkout is idempotent on quote_id** (INSERT … ON CONFLICT DO NOTHING): a
+   double "Pay" tap / BFF retry consuming the same quote never creates a 2nd row.
+5. **Rotation: publish before sign, retire after overlap.** Signing uses the
+   ring's primary key; verification accepts any ring key, so an outgoing key still
+   verifies in-flight quotes for the ≥10-min overlap (a quote's max life). Retiring
+   the primary or the last key is refused. Rehearsed unit + live.
+6. **`pricing_v1` default is env-driven** (`FLAG_PRICING_V1`), OFF in the prod
+   overlay and ON in the e2e realcmd — the flag gates `POST /v1/quotes` + checkout
+   (disabled ⇒ 404 PRICING_DISABLED). Per-request `X-Flag-Override` honoured only in
+   non-prod builds (testhooks).

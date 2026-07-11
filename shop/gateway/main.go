@@ -64,6 +64,14 @@ var bffsWithBrowsePassthrough = []string{"customer-bff"}
 // contracts/openapi/customer-bff.v1.yaml.
 var bffsWithCartPassthrough = []string{"customer-bff"}
 
+// bffsWithQuotesPassthrough are the BFF prefixes whose /v1/quotes* paths the
+// gateway routes DIRECTLY to the pricing-promo slot (V-T8 — price a cart →
+// signed quote + checkout consume via customer-bff, D10). Same
+// discover-from-route-table lifecycle as the cart passthrough; the pricing_v1
+// flag is resolved INSIDE pricing-promo (not the gateway), and the E2E env forces
+// it on via the realcmd. Documented in contracts/openapi/customer-bff.v1.yaml.
+var bffsWithQuotesPassthrough = []string{"customer-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -282,6 +290,30 @@ func main() {
 		mux.Handle(bffPrefix+"v1/carts", strip)
 		mux.Handle(bffPrefix+"v1/carts/", strip)
 		log.Printf("cart passthrough %sv1/carts* -> %s (cart)", bffPrefix, cartBase)
+	}
+
+	// --- V-T8 quotes passthrough ---
+	// pricing-promo owns quotes; the customer app prices a cart + checks out a
+	// quote through the BFF. Same discover-from-route-table pattern:
+	// /customer-bff/v1/quotes* routes directly to the pricing-promo slot (stable
+	// per-slot port survives the stub->real swap). Idempotency-Key + the signed
+	// quote body pass through the reverse proxy untouched. Documented in
+	// contracts/openapi/customer-bff.v1.yaml.
+	pricingBase := upstreamFor(routes, "/pricing-promo/")
+	for _, bff := range bffsWithQuotesPassthrough {
+		bffPrefix := "/" + bff + "/"
+		if pricingBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		pricingURL, err := url.Parse(pricingBase)
+		if err != nil {
+			log.Fatalf("bad pricing-promo upstream %q: %v", pricingBase, err)
+		}
+		pricingProxy := httputil.NewSingleHostReverseProxy(pricingURL)
+		strip := http.StripPrefix("/"+bff, pricingProxy)
+		mux.Handle(bffPrefix+"v1/quotes", strip)
+		mux.Handle(bffPrefix+"v1/quotes/", strip)
+		log.Printf("quotes passthrough %sv1/quotes* -> %s (pricing-promo)", bffPrefix, pricingBase)
 	}
 
 	flagSet := flags.FromEnv()
