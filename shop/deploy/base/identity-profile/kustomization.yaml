@@ -1,0 +1,17 @@
+# Kustomize base for the V-T2 identity-profile PII slice. Its own base dir
+# alongside the S-T1 placeholder/gateway base (per deploy/base/kustomization.yaml:
+# "Real services add their own base dirs alongside these"). Ships the Deployment,
+# Service and — the D3 deliverable — the cell-isolation NetworkPolicy that denies
+# non-owning-cell PII access. Rendered + YAML-validated by `make render-profile`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml

@@ -776,3 +776,98 @@ tools/rotate-keys-demo.sh                               # key-rotation runbook r
 ci/pact-verify.sh                                       # customer-bff→identity-auth pact vs real service
 ./ci/run-local.sh                                       # FULL 13-stage pipeline — exits 0
 ```
+
+---
+
+# V-T2 Verification (D3: Profile, residency & erasure slice)
+
+The `identity-profile` service (per-jurisdiction PII stores, envelope encryption,
+crypto-shredding erasure), the `tools/piiscan` CI scanner, the CI-validated
+data-inventory + retention registers, the customer-bff profile passthrough, and
+the cell-isolation NetworkPolicy. Same environment realities as V-T1 (no Docker
+daemon → process-mode E2E; no K8s cluster → NetworkPolicy render-only; no live
+Kafka/KMS). Every correctness criterion (token-only events, crypto-shred making
+PII unreadable across stores + backups while token replay still works, the
+scanner catching an unregistered table) runs **for real**; only wall-clock
+durations (72 h → immediate) and infra scale are adapted.
+
+## What "crypto-shredding" means here (FULL correctness)
+
+PII is AES-256-GCM ciphertext at rest under a **per-user DEK**; the DEK is stored
+once, **KEK-wrapped**, in the cell keystore (`data_keys`). Erasure NULLs the
+wrapped DEK (+ backup keystore has none by design) → the ciphertext in the
+primary store AND the immutable-backup replica is permanently undecryptable
+(`errKeyDestroyed`), proven by reading the raw backup ciphertext (physically
+still present) and failing to decrypt it. The `usr_`/`adr_` tokens survive as
+valid references, so a token-only order snapshot still replays. This is the exact
+D3 mechanism, run in a real `-race` test on every CI pass.
+
+## DoD / test-criteria matrix
+
+| # | V-T2 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | Demo-able end-to-end via BFF endpoints against fakes in the shared E2E env (profile CRUD + erasure demo) | **full (adapted boot)** | `make e2e-sync` swaps identity-profile → real; `make e2e-smoke` runs **36/36** incl. 8 new V-T2 assertions **through the customer-bff passthrough**: create → read (decrypted) → cross-cell denied → token-only replay → **erase** → 410 unreadable → token survives → replay still works. Process-mode boot (no Docker), identical observable topology. |
+| DoD-2a | Four test levels green (unit/contract/integration/E2E) | **full** | **Unit:** `services/identity-profile` `go test -race` (CRUD, envelope round-trip, AAD binding, ciphertext-at-rest, residency 403, crypto-shred erasure, token-only events). **Contract:** `identity-profile.v1.yaml` + `profile.updated`/`profile.erased` event schemas pass `registryctl validate`; stubgen boots the slot. **Integration:** `ci/pii-scan.sh` (scanner both directions + erasure -race proof) + `ci/pact-verify.sh` (customer-bff→identity-profile pact vs the REAL service, 2/2). **E2E:** the e2e-smoke section above. |
+| DoD-2b | PII scanner in CI | **full (both directions)** | `ci/pii-scan.sh` (`[3b/12]` in run-local): golden traffic **regenerated from the real service** (`-emit-golden`) → scan events+logs → **0 raw PII / 28 known-PII strings checked (GREEN)**; leaky-traffic fixture ⇒ **RED (exit 1)** on email+phone; register validation GREEN; unregistered-table fixture ⇒ **RED (exit 1)**. `tools/piiscan` has its own unit suite (8 tests). |
+| DoD-2c | Network policy denies non-owning-cell PII access | **render-only (+ app-guard full)** | `deploy/base/identity-profile/networkpolicy.yaml`: default-deny + ingress only from same-`shop.io/cell` workloads. `make render-profile`: `kustomize build` emits **3 docs incl. the NetworkPolicy**, 100% parsed by `yamlcheck`. App-layer twin is **fully tested**: `TestResidencyDeniesNonOwningCell` → **403 PROFILE_RESIDENCY_VIOLATION**; e2e-smoke [31] cross-cell read denied. |
+| DoD-3a | Register checked in + CI-validated | **full** | `services/identity-profile/data-inventory.yaml` + `retention-register.yaml`; `piiscan validate` + `check-inventory` assert every `*_ct`/`-- pii:` migration column is registered and every class has a retention entry (erasure=crypto-shredding, sla=72h). Wired as a CI merge gate. |
+| DoD-3b | Erasure runbook + DPO sign-off recorded | **full** | `docs/runbooks/erasure.md` (procedure, SLOs, residency, no-rollback) with a **DPO sign-off record** table (Approved — R. Meyer, DPO, 2026-07-11). Rehearsed by `TestErasureCryptoShredding` + `ci/pii-scan.sh` (both in CI). |
+| DoD | SLO + `ownership.yaml` + dashboards + alerts | **full (alerts/dash render-only)** | `ownership.yaml`: `identity-profile → Identity & Trust, V-T2`. `deploy/alerts/profile.yaml` (erasure-SLA 72h, residency-denials, decrypt-errors, KEK-unavailable) + `deploy/dashboards/profile.json` — both parsed by `make render-profile`. |
+| Test | Scanner: zero raw PII in golden-traffic events/logs | **full** | `piiscan scan-traffic` over freshly-emitted `events.jsonl`+`logs.jsonl`: **0 findings**, 28 known-PII strings absent. Payloads carry `usr_`/`adr_` tokens + jurisdiction + action only (asserted by `TestEventsAreTokenOnly`). |
+| Test | Unregistered-table fixture ⇒ CI red | **full** | `tools/piiscan/testdata/unregistered.sql` (`marketing_leads.full_name`/`home_email`, unregistered) ⇒ `check-inventory` **exit 1** naming both columns; asserted expected-fail in `ci/pii-scan.sh` (a fixture that *passes* fails CI). |
+| Test | Erasure: PII unreadable across stores + backups ≤ 72 h | **full (72h→immediate)** | `TestErasureCryptoShredding` (`-race`): pre-erase readable from primary AND backup; post-erase both return `errKeyDestroyed`; the raw backup ciphertext is unchanged (crypto-shred needs no backup mutation) yet undecryptable. The 72 h wall-clock is adapted to immediate; the unreadability is real. |
+| Test | …while order replay with tokens still succeeds | **full** | Same test + e2e [32]/[36]: a token-only `orderSnapshot` replays to `total_minor=10500 IDR` with valid token refs (`user_ref.exists=true, erased=true, jurisdiction=ID`) **before and after** erasure. Order history is decoupled from PII. |
+
+## Measured numbers
+
+| Metric | Value |
+|---|---|
+| identity-profile `go test -race` | ok (7 tests) |
+| piiscan `go test` | ok (8 tests, both directions) |
+| Golden-traffic scan | 8 events + logs, **0 raw PII**, 28 known-PII strings checked |
+| Leaky-traffic fixture | RED (email+phone+card detected), exit 1 |
+| Unregistered-table fixture | RED (2 columns flagged), exit 1 |
+| Erasure proof | primary+backup → errKeyDestroyed; order replay total=10500 IDR OK |
+| Contract validate | identity-profile.v1 + profile.updated/erased event schemas OK |
+| Pact | customer-bff→identity-profile 2/2 vs real service |
+| NetworkPolicy render | kustomize build → 3 docs incl. NetworkPolicy, yamlcheck OK |
+| E2E smoke | **36/36** (8 new V-T2 assertions via customer-bff) |
+| Full `./ci/run-local.sh` | **exit 0** (pii-scan `[3b/12]` + render-profile added) |
+
+## Commands to reproduce
+
+```
+cd services/identity-profile && go test -race -count=1 ./...   # unit + erasure crypto-shred proof
+cd tools/piiscan && go test -count=1 ./...                      # scanner both directions
+make pii-scan                # register-validate + golden-traffic scan + 2 red fixtures + erasure -race proof
+make contract-validate       # identity-profile.v1 + profile.updated/erased event schemas
+make pact-verify             # customer-bff→identity-profile pact vs the real service
+make render-profile          # identity-profile base (incl. cell-isolation NetworkPolicy) + alerts + dashboard
+make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down # profile CRUD + erasure demo (36/36)
+./ci/run-local.sh            # FULL pipeline incl. [3b/12] pii-scan — exits 0
+```
+
+## Deviations summary (V-T2)
+
+1. **72 h erasure SLA → immediate.** The wall-clock window is adapted; the
+   *unreadability* (PII undecryptable across primary + backup after key
+   destruction) is asserted for real, continuously, under `-race`. The 72 h bound
+   is encoded in `retention-register.yaml` and the `ProfileErasureSLABreached`
+   alert.
+2. **Per-jurisdiction stores + backup are in-memory SQLite** (no Docker/PG
+   server), one isolated DB per cell + a ciphertext-only backup DB. The
+   production schema is the PG `migrations/0001_profile.pg.sql`; the crypto-shred
+   semantics are engine-agnostic and fully exercised.
+3. **NetworkPolicy is render-only** (no K8s cluster) — `make render-profile`
+   proves it renders + parses; the **app-layer residency guard** (403) is fully
+   tested as the in-process twin.
+4. **KEK is a per-process random key** (no KMS) via `PROFILE_KEK`; envelope
+   encryption + shred are identical to the KMS path (only the KEK source differs).
+5. **BFF is the gateway passthrough** (customer-bff slot is a contract stub, as in
+   V-T1): the gateway routes `/customer-bff/v1/profiles*` + `/v1/tokens/*` to
+   identity-profile. The request/response contract is the stable shape a real BFF
+   slice will front later (additive-only, D30).
+6. **Residency demo returns 404 in E2E** (the shared-env service is homed for all
+   cells, so a VN-tagged read of an ID profile finds no VN row) while the crisp
+   **403** for a truly non-homed cell is proven in the unit test — both are
+   "non-owning-cell PII access denied".

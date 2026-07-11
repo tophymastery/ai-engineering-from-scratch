@@ -1,0 +1,83 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: identity-profile
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: identity-and-trust
+    slice: V-T2
+    decisions: D3
+spec:
+  groups:
+    # SLOs (V-T2 / D3):
+    #   - right-to-erasure completes within 72 h (crypto-shred the per-user DEK)
+    #   - PII is served ONLY from the owning cell (residency)
+    #   - PII is always decryptable for live users (KEK/KMS available)
+    - name: identity-profile.erasure
+      rules:
+        # Age of the oldest still-pending erasure request. Past 72 h the D3 / V-T2
+        # SLA is breached — a regulator-facing miss, so it pages.
+        - alert: ProfileErasureSLAApproaching
+          expr: max(identity_profile_erasure_pending_seconds) by (cell) > 216000  # 60h
+          for: 10m
+          labels:
+            severity: warning
+            team: identity-and-trust
+          annotations:
+            summary: "Erasure request approaching the 72h SLA ({{ $labels.cell }})"
+            description: "An erasure request has been pending > 60h. Crypto-shred must destroy the per-user DEK within 72h across stores + backups. Runbook: docs/runbooks/erasure.md."
+        - alert: ProfileErasureSLABreached
+          expr: max(identity_profile_erasure_pending_seconds) by (cell) > 259200  # 72h
+          for: 1m
+          labels:
+            severity: critical
+            team: identity-and-trust
+          annotations:
+            summary: "Erasure SLO breached — request > 72h old ({{ $labels.cell }})"
+            description: "Right-to-erasure not honoured within 72h. Escalate immediately; the DPO must be notified. Runbook: docs/runbooks/erasure.md."
+        - alert: ProfileErasureFailures
+          expr: sum(rate(identity_profile_erasure_failures_total[15m])) by (cell) > 0
+          for: 15m
+          labels:
+            severity: critical
+            team: identity-and-trust
+          annotations:
+            summary: "Erasure operations failing ({{ $labels.cell }})"
+            description: "Crypto-shred erasure is erroring (keystore write failure?). Pending requests will breach the 72h SLA. Runbook: docs/runbooks/erasure.md."
+
+    - name: identity-profile.residency
+      rules:
+        # Non-owning-cell PII access attempts. The NetworkPolicy denies these at
+        # L3; a spike at the app layer means a misrouted client or an attack.
+        - alert: ProfileResidencyViolations
+          expr: sum(rate(identity_profile_residency_denied_total[5m])) by (cell) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            team: identity-and-trust
+          annotations:
+            summary: "Cross-cell PII access attempts ({{ $labels.cell }})"
+            description: "identity-profile is refusing non-owning-cell PII reads (PROFILE_RESIDENCY_VIOLATION). Confirm the NetworkPolicy is applied and clients route to the owning cell (D3)."
+
+    - name: identity-profile.crypto
+      rules:
+        # Decrypt failures for NON-erased users mean a KEK/KMS problem — live
+        # users can't read their PII. (Erased users decrypt-failing is expected.)
+        - alert: ProfilePIIDecryptErrors
+          expr: sum(rate(identity_profile_decrypt_errors_total{reason!="erased"}[5m])) by (cell) > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: identity-and-trust
+          annotations:
+            summary: "PII decrypt errors for live users ({{ $labels.cell }})"
+            description: "DEK unwrap/field decrypt failing for non-erased profiles — suspect KEK/KMS unavailability or key corruption. PII reads will fail."
+        - alert: ProfileKEKUnavailable
+          expr: min(identity_profile_kek_available) by (cell) == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: identity-and-trust
+          annotations:
+            summary: "Master KEK unavailable ({{ $labels.cell }})"
+            description: "The KMS-resident KEK cannot be loaded; no PII can be encrypted or decrypted. Check KMS reachability + the identity-profile-kek secret."

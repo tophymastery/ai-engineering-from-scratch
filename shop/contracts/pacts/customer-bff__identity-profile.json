@@ -1,0 +1,35 @@
+{
+  "consumer": { "name": "customer-bff" },
+  "provider": { "name": "identity-profile" },
+  "metadata": {
+    "note": "V-T2 pact: the customer BFF's profile passthrough consumes identity-profile's create-profile + token-resolve. File-based broker (see contracts/pacts/customer-bff__placeholder.json) — registryctl pact-verify REPLAYS each interaction against the REAL identity-profile service (booted by ci/pact-verify.sh) and asserts status + response shape. Tokens (usr_/adr_) are non-deterministic, so only stable scalars (jurisdiction, kind, exists, erased) are pinned; the X-Cell header selects the owning jurisdiction cell (D3 residency).",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "create a customer profile in the ID cell (PII encrypted at rest)",
+      "request": {
+        "method": "POST",
+        "path": "/v1/profiles",
+        "headers": { "Content-Type": "application/json", "X-Cell": "ID" },
+        "body": { "jurisdiction": "ID", "full_name": "Budi Santoso", "phone": "+62-812-1111-2222", "email": "budi@example.co.id" }
+      },
+      "response": {
+        "status": 201,
+        "body": { "jurisdiction": "ID", "erased": false }
+      }
+    },
+    {
+      "description": "resolve an unknown usr_ token returns a non-PII reference",
+      "request": {
+        "method": "GET",
+        "path": "/v1/tokens/usr_01hpactunknown00000000000000",
+        "headers": { "X-Cell": "ID" }
+      },
+      "response": {
+        "status": 200,
+        "body": { "kind": "user", "jurisdiction": "ID", "exists": false, "erased": false }
+      }
+    }
+  ]
+}

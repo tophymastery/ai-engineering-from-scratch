@@ -1,0 +1,66 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T2 / D3 identity-profile PII plane. Panels bind to the metrics identity-profile exports (also driving deploy/alerts/profile.yaml). Provisioned per cell via the {cell} template var. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Identity Profile — PII, Residency & Erasure (V-T2 / D3)",
+  "uid": "identity-profile-v-t2",
+  "tags": ["identity-and-trust", "pii", "erasure", "D3", "V-T2"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "cell", "type": "query", "query": "label_values(identity_profile_requests_total, cell)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Oldest pending erasure age (SLO <= 72h)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 216000 }, { "color": "red", "value": 259200 } ] } } },
+      "targets": [
+        { "expr": "max(identity_profile_erasure_pending_seconds{cell=~\"$cell\"}) by (cell)", "legendFormat": "{{cell}} oldest pending" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Erasures — completed vs failed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(identity_profile_erasures_total{cell=~\"$cell\"}[5m]))", "legendFormat": "crypto-shred completed/s" },
+        { "expr": "sum(rate(identity_profile_erasure_failures_total{cell=~\"$cell\"}[5m]))", "legendFormat": "failed/s" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Residency — cross-cell PII access denied (NetworkPolicy + app guard)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(identity_profile_residency_denied_total{cell=~\"$cell\"}[5m])) by (cell)", "legendFormat": "{{cell}} denied/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Crypto health — KEK available & PII decrypt errors (live users)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "min(identity_profile_kek_available{cell=~\"$cell\"}) by (cell)", "legendFormat": "{{cell}} KEK available" },
+        { "expr": "sum(rate(identity_profile_decrypt_errors_total{cell=~\"$cell\",reason!=\"erased\"}[5m]))", "legendFormat": "decrypt errors/s (live)" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Profile API outcome rate (create/read/update/erase by status)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(identity_profile_requests_total{cell=~\"$cell\"}[5m])) by (route, status)", "legendFormat": "{{route}} {{status}}" }
+      ]
+    }
+  ]
+}

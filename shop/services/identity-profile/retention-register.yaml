@@ -1,0 +1,30 @@
+# retention-register.yaml — the CI-validated retention + erasure register for
+# identity-profile (D3). Pairs with data-inventory.yaml: every PII class in the
+# inventory MUST have an entry here. tools/piiscan validate enforces the erasure
+# mechanism (crypto-shredding) and the ≤ 72 h SLA (V-T2 test criterion).
+version: 1
+service: identity-profile
+decision: D3
+
+# How the right-to-erasure is honoured against immutable stores (PDP Law ID /
+# Decree 53 VN / GDPR-class elsewhere): destroy the per-user data-encryption key.
+erasure:
+  mechanism: crypto-shredding
+  key: per-user-DEK
+  sla_hours: 72                    # PII unreadable across stores + backups within 72h
+  scope:                           # every substrate the shred renders unreadable
+    - primary
+    - backup
+    - events
+    - wal
+  runbook: docs/runbooks/erasure.md
+
+# Per PII class: legal basis, retention, and the erasure mechanism. Retention is
+# "user-lifetime" (kept while the account is active); erasure is crypto-shred on
+# account deletion / erasure request.
+classes:
+  - { class: name,    basis: contract, retention: user-lifetime, erasure: crypto-shred }
+  - { class: phone,   basis: contract, retention: user-lifetime, erasure: crypto-shred }
+  - { class: email,   basis: contract, retention: user-lifetime, erasure: crypto-shred }
+  - { class: address, basis: contract, retention: user-lifetime, erasure: crypto-shred }
+  - { class: geo,     basis: consent,  retention: 90-days,        erasure: crypto-shred }

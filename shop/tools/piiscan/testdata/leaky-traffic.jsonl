@@ -1,0 +1,2 @@
+{"event_id":"evt_01","event_type":"profile.updated","payload":{"user_token":"usr_01h8xg","email":"budi.santoso@example.co.id","phone":"+62-812-1111-2222"}}
+{"event_id":"evt_02","event_type":"profile.updated","payload":{"user_token":"usr_02h8xg","full_name":"Nguyen Van An"}}

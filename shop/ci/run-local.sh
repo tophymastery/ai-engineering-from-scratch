@@ -21,6 +21,9 @@ make contract-validate
 step "[3/12] pact-verify (S-T5) — file-based broker vs booted provider (+ broken-pact red fixture)"
 make pact-verify
 
+step "[3b/12] pii-scan (V-T2/D3) — zero raw PII in golden traffic + register validation + crypto-shred erasure proof (+ 2 red fixtures)"
+make pii-scan
+
 step "[4/12] build images + sign (cosign) — prod tags, no testhooks"
 make build
 echo "cosign: sign step is config-only in this env (no registry/keyless OIDC)."
@@ -46,6 +49,7 @@ step "[10/12] render kustomize overlays (4/4) + preview-shared/gitops manifests 
 make render
 make render-preview
 make render-events
+make render-profile
 
 step "[11/13] boot + seed (S-T7 demo-small via public APIs) + smoke"
 make up
