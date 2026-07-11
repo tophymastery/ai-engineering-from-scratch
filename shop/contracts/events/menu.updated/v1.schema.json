@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/menu.updated/v1.schema.json",
+  "title": "menu.updated v1",
+  "description": "Emitted by merchant-catalog (V-T3) whenever a merchant's menu is created or edited. Keyed by aggregate:merchant_id so a merchant's catalog events stay ordered in one partition. Consumers: search (reindex) + cart (revalidate items). Carries the FULL current menu snapshot (no N+1 read-back, 02 §5). D30: additive-only within this topic.",
+  "x-topic": "menu.updated",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "menu.updated" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "merchant" },
+        "id": { "type": "string", "description": "mer_ token — the partition key (merchant_id)." },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["merchant_id", "version", "items"],
+      "properties": {
+        "merchant_id": { "type": "string", "description": "mer_ token." },
+        "version": { "type": "integer", "description": "monotonic menu version; lets consumers order/dedupe edits." },
+        "menu_etag": { "type": "string", "description": "strong validator; correlates with the HTTP ETag." },
+        "items": {
+          "type": "array",
+          "description": "the full current item set (snapshot).",
+          "items": {
+            "type": "object",
+            "required": ["item_id", "name", "amount", "currency", "available"],
+            "properties": {
+              "item_id": { "type": "string" },
+              "name": { "type": "string" },
+              "amount": { "type": "integer", "description": "integer minor units (02 §1 Money)." },
+              "currency": { "type": "string" },
+              "available": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

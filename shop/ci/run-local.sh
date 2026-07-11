@@ -50,6 +50,7 @@ make render
 make render-preview
 make render-events
 make render-profile
+make render-catalog
 
 step "[11/13] boot + seed (S-T7 demo-small via public APIs) + smoke"
 make up

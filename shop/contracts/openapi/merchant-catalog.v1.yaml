@@ -1,45 +1,170 @@
-# merchant-catalog.v1 — minimal S-T8 topology contract (01 §1 `merchant-catalog`).
-# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T3 merges.
-# Grows additively per D30. Conventions (02 §1): /v1 paths, snake_case fields,
-# the 02 §2 error envelope on every non-2xx.
+# merchant-catalog.v1 — the V-T3 merchant catalog & menus contract (01 §1
+# `merchant-catalog`). S-T8 shipped a minimal read-menu stub; V-T3 GROWS IT
+# ADDITIVELY (D30): create-merchant, menu editor and store-status endpoints, all
+# under ETag/If-Match optimistic concurrency (02 §1 → 412 on stale write).
+# Conventions (02 §1): /v1 paths, snake_case fields, integer-minor-unit Money,
+# the 02 §2 error envelope on every non-2xx. Mutating endpoints are gated by the
+# `catalog_v1` flag (dark by default; e2e runs with it on).
 openapi: 3.0.3
 info:
   title: merchant-catalog
-  version: "1.0.0"
-  description: Merchants, stores, menus (01 §1). Minimal E2E stub surface — read menu.
+  version: "1.1.0"
+  description: >
+    Merchants, stores, menus, items, availability (01 §1). Menu + store-status
+    are mutable resources: every read returns a strong ETag; a PATCH/PUT with a
+    stale If-Match is rejected 412 STALE_WRITE. Accepted mutations publish
+    menu.updated / store.status_changed (keyed by merchant_id) to search + cart.
 servers:
   - url: https://api.shop.io
 paths:
+  /v1/merchants:
+    post:
+      operationId: create_merchant
+      summary: Create a merchant (bootstraps an empty menu + CLOSED store status).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MerchantInput" }
+            example: { name: "Som Tam House" }
+      responses:
+        "201":
+          description: Merchant created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Merchant" }
+              example:
+                merchant_id: "mer_01H8XGABCDE"
+                name: "Som Tam House"
+                menu: { merchant_id: "mer_01H8XGABCDE", version: 1, etag: "\"a1b2c3\"", items: [] }
+                store_status: { merchant_id: "mer_01H8XGABCDE", status: "CLOSED", version: 1, etag: "\"d4e5f6\"" }
+                created_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
   /v1/merchants/{merchant_id}/menu:
     get:
       operationId: get_menu
-      summary: Read a merchant's published menu (menu editor lands in V-T3).
+      summary: Read a merchant's menu. Returns the current ETag (use it in If-Match to edit).
       parameters:
-        - name: merchant_id
-          in: path
-          required: true
-          schema: { type: string, example: "mer_01H8XGABCDE" }
+        - $ref: "#/components/parameters/MerchantID"
       responses:
         "200":
-          description: Menu.
+          description: Menu. The ETag is returned both as a header and in the body.
+          headers:
+            ETag:
+              description: Strong validator of the current menu version (02 §1).
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Menu" }
               example:
                 merchant_id: "mer_01H8XGABCDE"
-                store_status: "OPEN"
+                version: 3
+                etag: "\"a1b2c3\""
                 items:
                   - { item_id: "itm_01H8XG1", name: "Som Tam", price: { amount: 8000, currency: "THB" }, available: true }
         default:
           $ref: "#/components/responses/Error"
+    patch:
+      operationId: edit_menu
+      summary: Edit the menu (upsert/remove items). Requires If-Match; 412 on stale ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MenuPatch" }
+            example:
+              upsert_items:
+                - { name: "Larb", price: { amount: 9000, currency: "THB" }, available: true }
+              remove_item_ids: []
+      responses:
+        "200":
+          description: Menu updated; a new ETag is returned and menu.updated is published.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Menu" }
+        "412":
+          description: Stale write — the If-Match ETag no longer matches the current menu.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: { code: "STALE_WRITE", message: "The resource was modified; retry with the current version (ETag mismatch).", trace_id: "4bf9…", retryable: false }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/merchants/{merchant_id}/store-status:
+    get:
+      operationId: get_store_status
+      summary: Read the store status (OPEN/BUSY/CLOSED). Returns the current ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+      responses:
+        "200":
+          description: Store status + ETag.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreStatus" }
+              example: { merchant_id: "mer_01H8XGABCDE", status: "OPEN", version: 4, etag: "\"d4e5f6\"" }
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: set_store_status
+      summary: Set the store status. Requires If-Match; 412 on stale ETag.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [OPEN, BUSY, CLOSED] }
+            example: { status: "OPEN" }
+      responses:
+        "200":
+          description: Status updated; a new ETag is returned and store.status_changed is published.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreStatus" }
+        "412":
+          description: Stale write — the If-Match ETag no longer matches the current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        default:
+          $ref: "#/components/responses/Error"
 components:
+  parameters:
+    MerchantID:
+      name: merchant_id
+      in: path
+      required: true
+      schema: { type: string, example: "mer_01H8XGABCDE" }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: The resource's current ETag (from a prior GET). Stale value ⇒ 412 (02 §1).
+      schema: { type: string }
   schemas:
     Money:
       type: object
       required: [amount, currency]
       properties:
-        amount: { type: integer }
-        currency: { type: string }
+        amount: { type: integer, description: "integer minor units (never floats)" }
+        currency: { type: string, description: "ISO currency" }
     Item:
       type: object
       required: [item_id, name, price]
@@ -48,15 +173,56 @@ components:
         name: { type: string }
         price: { $ref: "#/components/schemas/Money" }
         available: { type: boolean }
+    ItemInput:
+      type: object
+      required: [name, price]
+      properties:
+        item_id: { type: string, description: "set to update an existing item; omit to create" }
+        name: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        available: { type: boolean }
     Menu:
       type: object
-      required: [merchant_id, items]
+      required: [merchant_id, version, etag, items]
       properties:
         merchant_id: { type: string }
-        store_status: { type: string, enum: [OPEN, BUSY, CLOSED] }
+        version: { type: integer }
+        etag: { type: string }
         items:
           type: array
           items: { $ref: "#/components/schemas/Item" }
+    MenuPatch:
+      type: object
+      properties:
+        upsert_items:
+          type: array
+          items: { $ref: "#/components/schemas/ItemInput" }
+        remove_item_ids:
+          type: array
+          items: { type: string }
+    StoreStatus:
+      type: object
+      required: [merchant_id, status, version, etag]
+      properties:
+        merchant_id: { type: string }
+        status: { type: string, enum: [OPEN, BUSY, CLOSED] }
+        version: { type: integer }
+        etag: { type: string }
+    MerchantInput:
+      type: object
+      required: [name]
+      properties:
+        merchant_id: { type: string, description: "optional client-supplied id (deterministic seeds); minted when omitted" }
+        name: { type: string }
+    Merchant:
+      type: object
+      required: [merchant_id, name, menu, store_status]
+      properties:
+        merchant_id: { type: string }
+        name: { type: string }
+        menu: { $ref: "#/components/schemas/Menu" }
+        store_status: { $ref: "#/components/schemas/StoreStatus" }
+        created_at: { type: string }
     Error:
       type: object
       required: [error]

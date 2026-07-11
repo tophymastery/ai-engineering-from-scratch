@@ -198,6 +198,53 @@ else
   assert_body "token-only order STILL replays (post-erase)" POST "/identity-profile/v1/orders:replay" '"total_minor":9000' "$SNAP"
 fi
 
+# --- 13. V-T3 merchant catalog & menus (ETag/If-Match → 412) — GATED on the
+# merchant-catalog slot being REAL (the stub can't version/publish). Demoed
+# THROUGH the merchant-bff passthrough (gateway routes /merchant-bff/v1/merchants*
+# -> merchant-catalog). Proves menu CRUD, store-status, and — the headline —
+# a stale If-Match is rejected 412 (100% of stale writes). ---
+echo "== V-T3 merchant catalog (create->menu edit->store status->STALE WRITE 412, via merchant-bff) =="
+CATALOG_MODE="$(awk -F'\t' '$1=="merchant-catalog"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$CATALOG_MODE" != "real" ]; then
+  echo "  SKIP: merchant-catalog slot mode='$CATALOG_MODE' (not real) — catalog section runs only when merchant-catalog is the real slot"
+else
+  CMID="mer_e2e_$$"
+  # Create the merchant (bootstraps an empty menu + CLOSED store) via the BFF.
+  CC="$(curl -s --max-time 8 -X POST "$GW/merchant-bff/v1/merchants" -H 'Content-Type: application/json' -d '{"merchant_id":"'"$CMID"'","name":"E2E Kitchen"}' 2>/dev/null)"
+  if [[ "$CC" == *'"merchant_id":"'"$CMID"'"'* ]] && [[ "$CC" == *'"status":"CLOSED"'* ]]; then pass "merchant created via merchant-bff ($CMID, store CLOSED)"; else bad "merchant create failed (${CC:0:160})"; fi
+
+  # Read the menu; capture the ETag header (the If-Match value for the edit).
+  MENU_ETAG="$(curl -s -D - -o /dev/null --max-time 8 "$GW/merchant-bff/v1/merchants/$CMID/menu" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  if [ -n "$MENU_ETAG" ]; then pass "GET menu returns a strong ETag ($MENU_ETAG)"; else bad "GET menu returned no ETag"; fi
+
+  # Edit the menu WITH the correct If-Match → 200 + a NEW ETag + the item present.
+  EDIT='{"upsert_items":[{"name":"Som Tam","price":{"amount":8000,"currency":"THB"},"available":true}]}'
+  ER2="$(curl -s -D - --max-time 8 -X PATCH "$GW/merchant-bff/v1/merchants/$CMID/menu" -H 'Content-Type: application/json' -H "If-Match: $MENU_ETAG" -d "$EDIT" 2>/dev/null)"
+  NEW_ETAG="$(printf '%s' "$ER2" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  if [[ "$ER2" == *'"name":"Som Tam"'* ]] && [ -n "$NEW_ETAG" ] && [ "$NEW_ETAG" != "$MENU_ETAG" ]; then pass "menu edit accepted, new ETag minted ($NEW_ETAG)"; else bad "menu edit failed (etag old=$MENU_ETAG new=$NEW_ETAG)"; fi
+
+  # HEADLINE: replay the STALE (original) ETag → 412 STALE_WRITE.
+  SC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X PATCH "$GW/merchant-bff/v1/merchants/$CMID/menu" -H 'Content-Type: application/json' -H "If-Match: $MENU_ETAG" -d "$EDIT" 2>/dev/null)"
+  if [ "$SC" = 412 ]; then pass "STALE WRITE rejected with 412 (ETag mismatch, 02 §1)"; else bad "stale write -> $SC (want 412)"; fi
+  # The 412 body carries the STALE_WRITE code envelope (direct curl: keep the stale If-Match).
+  SB="$(curl -s --max-time 8 -X PATCH "$GW/merchant-bff/v1/merchants/$CMID/menu" -H 'Content-Type: application/json' -H "If-Match: $MENU_ETAG" -d "$EDIT" 2>/dev/null)"
+  if [[ "$SB" == *'STALE_WRITE'* ]]; then pass "412 envelope carries STALE_WRITE code (02 §2)"; else bad "412 body missing STALE_WRITE (${SB:0:160})"; fi
+
+  # Missing If-Match on a mutating edit → 428 IF_MATCH_REQUIRED.
+  NC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X PATCH "$GW/merchant-bff/v1/merchants/$CMID/menu" -H 'Content-Type: application/json' -d "$EDIT" 2>/dev/null)"
+  if [ "$NC" = 428 ]; then pass "menu edit without If-Match rejected (428)"; else bad "no If-Match -> $NC (want 428)"; fi
+
+  # Store status: read ETag, set OPEN with If-Match → 200; stale set → 412.
+  ST_ETAG="$(curl -s -D - -o /dev/null --max-time 8 "$GW/merchant-bff/v1/merchants/$CMID/store-status" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  SO="$(curl -s --max-time 8 -X PUT "$GW/merchant-bff/v1/merchants/$CMID/store-status" -H 'Content-Type: application/json' -H "If-Match: $ST_ETAG" -d '{"status":"OPEN"}' 2>/dev/null)"
+  if [[ "$SO" == *'"status":"OPEN"'* ]]; then pass "store status set OPEN via merchant-bff (If-Match)"; else bad "set OPEN failed (${SO:0:160})"; fi
+  SSC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X PUT "$GW/merchant-bff/v1/merchants/$CMID/store-status" -H 'Content-Type: application/json' -H "If-Match: $ST_ETAG" -d '{"status":"BUSY"}' 2>/dev/null)"
+  if [ "$SSC" = 412 ]; then pass "stale store-status write rejected with 412"; else bad "stale store-status -> $SSC (want 412)"; fi
+
+  # The updated menu is readable (consumer read path used by search/cart).
+  assert_body "menu read reflects the edit" GET "/merchant-bff/v1/merchants/$CMID/menu" '"Som Tam"'
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

@@ -1,4 +1,4 @@
-# Verification (S-T1–S-T6)
+# Verification (S-T1–S-T8, V-T1–V-T3)
 
 How each Definition-of-Done item and test criterion was verified **in this
 environment**, and where the environment forced an adaptation. Legend:
@@ -871,3 +871,113 @@ make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down # profile CRUD +
    cells, so a VN-tagged read of an ID profile finds no VN row) while the crisp
    **403** for a truly non-homed cell is proven in the unit test — both are
    "non-owning-cell PII access denied".
+
+---
+
+# V-T3 Verification (Merchant catalog & menus slice — base blueprint, 01 §1)
+
+The `merchant-catalog` service (merchants, menus, items, availability, store
+status), its menu-editor + store-status endpoints under **ETag/If-Match
+optimistic concurrency** (02 §1 → **412 on stale write**), the two events it
+publishes through the **transactional outbox** (`menu.updated`,
+`store.status_changed`, keyed by `merchant_id`), consumer **pacts** for search +
+cart, the `catalog_v1` feature flag, the merchant-bff gateway passthrough, and
+the deploy/alerts/dashboard + runbook. Same environment realities as V-T1/V-T2
+(no Docker daemon → process-mode E2E; no K8s cluster → manifests render-only; no
+live Kafka/Prometheus). Every correctness criterion (412 on stale ETag,
+exactly-once event publish via the outbox, schema-valid events, pact
+verification) runs **for real**; only wall-clock throughput scale is adapted and
+disclosed below.
+
+## What "stale-write protection" means here (FULL correctness)
+
+Menu and store status are mutable resources carrying a monotonic `version`. Each
+read returns a strong `ETag` (a SHA-256 over `kind:merchant_id:version`) as a
+header and in the body. A `PATCH /menu` / `PUT /store-status` **requires**
+`If-Match`; the write is applied inside a DB transaction that (a) checks the
+client's `If-Match` against the current ETag and (b) does a compare-and-swap
+`UPDATE … WHERE version = <read>` — so under any concurrency exactly one writer
+commits and every stale writer gets **412 STALE_WRITE**. The accepted write's
+`menu.updated` / `store.status_changed` event is written to the outbox **in the
+same transaction**, so a rejected (412) edit publishes nothing and an accepted
+edit publishes exactly one event. This is the real mechanism, run under `-race`
+on every CI pass.
+
+## DoD / test-criteria matrix
+
+| # | V-T3 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | Demo-able end-to-end via BFF endpoints against fakes in the shared E2E env (flag `catalog_v1` on) | **full (adapted boot)** | `make e2e-sync` swaps merchant-catalog → real (catalog_v1 on); `make e2e-smoke` runs **45/45** incl. **9 new V-T3 assertions through the merchant-bff passthrough**: create merchant → GET menu ETag → edit (new ETag) → **stale write 412** → STALE_WRITE envelope → missing-If-Match 428 → set store OPEN → stale store-status 412 → menu read reflects edit. Process-mode boot (no Docker), identical observable topology. All-stubs smoke stays **21/21** (V-T3 section skips when the slot is a stub). |
+| DoD-2a | Four test levels green (unit/contract/integration/E2E) | **full** | **Unit/integration:** `services/merchant-catalog` `go test -race` (9 tests: CRUD, ETag chaining, 412 concurrent-edit fixture, If-Match-required, store-status concurrency, outbox events, no-event-on-failed-write, schema-valid events, flag gate, not-found). **Contract:** `merchant-catalog.v1` + `merchant-bff.v1` grown additively + `menu.updated`/`store.status_changed` schemas pass `registryctl validate`; menu.updated additive-diff green fixture. **Integration:** `ci/pact-verify.sh` boots the REAL service and verifies the search + cart pacts. **E2E:** the e2e-smoke section above. |
+| DoD-2b | Pacts for search + cart consumers | **full (file-based broker)** | `contracts/pacts/search__merchant-catalog.json` (menu read + store-status read) + `cart__merchant-catalog.json` (item price + availability read), verified by `registryctl pact-verify` **against the REAL merchant-catalog** booted by `ci/pact-verify.sh` (provider-state: a fixed merchant seeded with one item + OPEN store). **search 2/2, cart 1/1 PASS**; the broken-pact fixture still reds the build. The async event contract those consumers rely on is additionally pinned by the two JSON schemas + `registryctl validate`. |
+| DoD-3 | Stale-write protection verified (412 on ETag mismatch) | **full** | `TestConcurrentEditFixture` (`-race`): **100 concurrent writers** all holding the same v1 ETag → **exactly 1 accepted (200), 99 rejected 412 STALE_WRITE, 0 other**; the menu ends with exactly 1 item. Also `TestMenuCRUD`/`TestStoreStatusConcurrency`/`TestSequentialEditsChainETags` and e2e [40]/[41]/[44]. **100% of stale writes rejected with 412.** |
+| DoD | Dashboards + alerts live; SLO + runbook + `ownership.yaml` | **full (alerts/dash render-only)** | `deploy/alerts/catalog.yaml` (menu-CRUD p99, event-publish-lag, outbox-backlog, stale-write-ratio) + `deploy/dashboards/catalog.json` — both parsed by `make render-catalog`; `deploy/base/merchant-catalog` (Deployment+Service) renders via kustomize. `docs/runbooks/catalog.md` (SLOs + invariants + alert actions + rollout). `ownership.yaml`: `merchant-catalog → Discovery, V-T3` (already present, verified correct). |
+| Test | Menu CRUD p99 < 200 ms at 1k RPS | **adapted (scale) / full (latency)** | Real per-op latency through the full HTTP+store+outbox path (`TestPerf_MenuCRUD_P99`, no -race): **PATCH p99 = 577 µs, GET p99 = 211 µs** over 3000 ops each — both ≪ 200 ms. Concurrent **burst** (64 clients × 40 edits = 2560 writes): **p99 = 132 ms** < 200 ms. Scale adaptation: a literal sustained 1k RPS is unreachable in this sandbox (single-writer in-memory SQLite, no cluster), so the budget is proven by measured per-op p99 + a contended burst, not a 60 s soak. Numbers NOT fabricated — printed by the test. |
+| Test | Event publish lag p99 < 2 s | **adapted (scale) / full** | `TestPerf_EventPublishLag_P99`: lag from an accepted mutation (HTTP 200) to the event being **durable + tailable** in the outbox (the outbox row commits in the same txn, so it is already durable at 200; a tight relay-poll loop simulates the CDC relay): **p99 = 633 µs** ≪ 2 s over 500 events. (Adaptation: no live Kafka; the outbox → relay seam is the same one a real CDC relay fills.) |
+| Test | Concurrent-edit fixture: 100% of stale writes rejected with 412 | **full** | `TestConcurrentEditFixture` (`-race`): **1 winner / 99 × 412 / 0 other = 100% of stale writes rejected**, asserted exactly. Store-status has the same guard (`TestStoreStatusConcurrency`). |
+
+## Measured numbers
+
+| Metric | Value |
+|---|---|
+| merchant-catalog `go test -race` | ok (9 tests, incl. 100-writer concurrent-edit fixture) |
+| Concurrent-edit fixture | 100 writers → **1 accepted, 99 × 412 STALE_WRITE, 0 other** (100% stale rejected) |
+| Menu write p99 (steady-state, 3000 ops) | **577 µs** (budget 200 ms) |
+| Menu read p99 (3000 ops) | **211 µs** (budget 200 ms) |
+| Menu write p99 under burst (64 clients × 40) | **132 ms** (budget 200 ms) |
+| Event publish-readiness lag p99 (500 events) | **633 µs** (budget 2 s) |
+| Emitted events schema-valid | menu.updated + store.status_changed validated against draft-07 schemas (`TestEmittedEventsAreSchemaValid`) |
+| Exactly-once publish | create→2 events, edit→1, status→1; failed (412) edit→**0** events (`TestFailedWriteEmitsNoEvent`) |
+| Contract validate | merchant-catalog.v1 + merchant-bff.v1 + menu.updated/store.status_changed schemas OK; additive-diff green fixture OK |
+| Pacts | search→merchant-catalog **2/2**, cart→merchant-catalog **1/1** vs the REAL service |
+| Kustomize render | `make render-catalog` → 2 docs (Deployment+Service) + alerts + dashboard, yamlcheck OK |
+| E2E smoke | **45/45** (9 new V-T3 assertions via merchant-bff); all-stubs **21/21** (V-T3 skipped) |
+| Full `./ci/run-local.sh` | **exit 0** (V-T3 wired into make test, contract-validate, pact-verify, render-catalog, e2e-smoke) |
+
+## Commands to reproduce
+
+```
+cd services/merchant-catalog && go test -race -count=1 ./...          # unit + 100-writer 412 fixture + outbox + schema-valid
+cd services/merchant-catalog && go test -count=1 -run TestPerf ./...  # perf criteria (no -race): menu p99 + event-lag p99
+make contract-validate       # merchant-catalog.v1 + merchant-bff.v1 + menu.updated/store.status_changed + additive fixture
+make pact-verify             # search + cart pacts vs the REAL merchant-catalog
+make render-catalog          # merchant-catalog base (Deployment+Service) + alerts + dashboard
+make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down       # menu CRUD + store-status + 412 stale-write demo (45/45)
+./ci/run-local.sh            # FULL pipeline incl. all V-T3 gates — exits 0
+```
+
+## Deviations summary (V-T3)
+
+1. **1k RPS sustained → per-op p99 + contended burst.** Throughput scale is
+   adapted (single-writer in-memory SQLite, no cluster); the *latency* is real
+   and measured (menu write p99 577 µs, read 211 µs, burst 132 ms — all under the
+   200 ms budget). The literal 1k-RPS soak is the seam a load harness (V-T31)
+   fills; the per-op budget is met with wide margin.
+2. **Event publish lag → publish-readiness lag.** No live Kafka; the outbox row
+   is committed in the same transaction as the write, so the event is durable at
+   HTTP-200 and a tight tail-poll (standing in for the CDC relay) measures p99
+   633 µs. The outbox→relay seam is identical to production.
+3. **Store is in-memory SQLite** (modernc, pure-Go), one DB with the outbox
+   tables migrated alongside; the production schema is `migrations/0001_catalog.pg.sql`.
+   The ETag/version CAS + transactional-outbox semantics are engine-agnostic and
+   fully exercised.
+4. **BFF is the gateway passthrough** (merchant-bff slot is a contract stub, as
+   customer-bff is in V-T1/V-T2): the gateway routes `/merchant-bff/v1/merchants*`
+   → merchant-catalog, ETag/If-Match flowing through the reverse proxy untouched.
+   The request/response contract is the stable shape a real merchant-bff slice
+   will front later (additive-only, D30). Documented in `merchant-bff.v1.yaml`.
+5. **Consumer pacts are read-path HTTP contracts** (search reads menu +
+   store-status; cart reads item price + availability), verified against the real
+   provider. The *event* contract those same consumers subscribe to
+   (`menu.updated` / `store.status_changed`) is pinned by the JSON schemas +
+   `registryctl validate` + the additive-diff fixture — so neither the read nor
+   the event surface can break search/cart unnoticed.
+6. **Perf tests are tagged `//go:build !race`** and run in a dedicated non-race
+   pass: race instrumentation (~10×) plus the single-writer SQLite connection
+   would report sandbox-bound latencies, not the code's. The concurrency
+   *correctness* proof (100% stale writes → 412) DOES run under `-race`.
+7. **`catalog_v1` default is env-driven** (`FLAG_CATALOG_V1`), OFF in the prod
+   overlay and ON in the e2e realcmd — the flag gates the whole mutating surface
+   (reads still work; edits return 404 CATALOG_DISABLED when dark). Per-request
+   `X-Flag-Override` is honoured only in non-prod builds (testhooks), matching
+   S-T3/libs-flags.

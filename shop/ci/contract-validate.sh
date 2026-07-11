@@ -37,6 +37,11 @@ sub "additive-only diff GREEN fixture (expect exit 0)"
   "$ROOT/contracts/events/order.created/v1.schema.json" \
   "$ROOT/contracts/fixtures/registry-green/order.created.additive.schema.json"
 
+sub "V-T3 menu.updated additive-only diff GREEN fixture (expect exit 0)"
+"$REG" diff \
+  "$ROOT/contracts/events/menu.updated/v1.schema.json" \
+  "$ROOT/contracts/fixtures/registry-green/menu.updated.additive.schema.json"
+
 sub "in-place shape-change RED fixture (expected-fail — must exit nonzero)"
 if "$REG" diff \
      "$ROOT/contracts/events/order.created/v1.schema.json" \

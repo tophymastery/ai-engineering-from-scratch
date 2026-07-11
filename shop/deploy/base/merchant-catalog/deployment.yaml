@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: merchant-catalog
+  labels:
+    app: merchant-catalog
+    shop.io/team: discovery
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: merchant-catalog
+  template:
+    metadata:
+      labels:
+        app: merchant-catalog
+        shop.io/team: discovery
+    spec:
+      containers:
+        - name: merchant-catalog
+          image: shop/merchant-catalog:latest
+          ports:
+            - containerPort: 8102
+          env:
+            - name: PORT
+              value: "8102"
+            - name: SERVICE_NAME
+              value: "merchant-catalog"
+            - name: ENV
+              value: "prod"
+            - name: REGION
+              value: "bkk"
+            # catalog_v1 ships dark (04 §1.3 / 03 §5). The staging/preview overlays
+            # flip it on; prod is enabled via a canary-gated rollout.
+            - name: FLAG_CATALOG_V1
+              value: "false"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8102
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8102
+            initialDelaySeconds: 2
+            periodSeconds: 10

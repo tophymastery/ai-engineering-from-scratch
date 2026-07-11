@@ -1,0 +1,60 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: merchant-catalog
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: discovery
+    slice: V-T3
+    decisions: none
+spec:
+  groups:
+    # SLOs (V-T3):
+    #   - menu CRUD p99 < 200 ms
+    #   - menu.updated / store.status_changed publish lag p99 < 2 s
+    #   - stale writes are the intended 412 path, not an error — alert only if the
+    #     412 RATE spikes (a client stuck on a stale ETag / a hot-contention bug)
+    - name: merchant-catalog.latency
+      rules:
+        - alert: CatalogMenuCRUDLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(merchant_catalog_request_duration_seconds_bucket{route=~"/v1/merchants.*"}[5m])) by (le, route)) > 0.2
+          for: 10m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "merchant-catalog menu CRUD p99 > 200ms ({{ $labels.route }})"
+            description: "Menu CRUD p99 latency budget (200ms) is burning. Check DB load / lock contention on the menu version CAS. Runbook: docs/runbooks/catalog.md."
+
+    - name: merchant-catalog.events
+      rules:
+        - alert: CatalogEventPublishLagHigh
+          expr: histogram_quantile(0.99, sum(rate(merchant_catalog_outbox_publish_lag_seconds_bucket[5m])) by (le)) > 2
+          for: 5m
+          labels:
+            severity: critical
+            team: discovery
+          annotations:
+            summary: "merchant-catalog event publish lag p99 > 2s"
+            description: "menu.updated / store.status_changed events are lagging in the outbox relay (search + cart go stale). Check the CDC relay / Kafka. Runbook: docs/runbooks/catalog.md."
+        - alert: CatalogOutboxBacklogGrowing
+          expr: max(merchant_catalog_outbox_unpublished_rows) > 1000
+          for: 10m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "merchant-catalog outbox backlog > 1000 unpublished rows"
+            description: "The transactional outbox is filling faster than the relay drains it. Consumers (search/cart) will be stale. Runbook: docs/runbooks/catalog.md."
+
+    - name: merchant-catalog.concurrency
+      rules:
+        - alert: CatalogStaleWriteRateHigh
+          expr: sum(rate(merchant_catalog_requests_total{code="412"}[5m])) / sum(rate(merchant_catalog_requests_total{method=~"PATCH|PUT"}[5m])) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "merchant-catalog stale-write (412) ratio > 50% of edits"
+            description: "A high fraction of menu/store edits are being rejected 412 (ETag mismatch). Expected under heavy concurrent editing, but a sustained spike suggests clients not refreshing ETags or a hot merchant. Not data loss (the write is correctly rejected). Runbook: docs/runbooks/catalog.md."
