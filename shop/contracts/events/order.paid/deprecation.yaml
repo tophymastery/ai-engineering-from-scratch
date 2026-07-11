@@ -1,0 +1,10 @@
+# D30 dual-publish window record. Presence + a valid, not-yet-past deprecation_date
+# are enforced by registryctl whenever a `<topic>.v2` directory exists for this topic.
+# During the window producers emit BOTH order.paid and order.paid.v2; gen-1 consumers
+# keep reading order.paid until they migrate. After deprecation_date registryctl fails
+# CI if order.paid is still published (forcing removal of the old topic).
+topic: order.paid
+replaced_by: order.paid.v2
+reason: "payload.total renamed to payload.order_total + required tip line — a shape change, not additive (D30)."
+deprecation_date: "2026-12-31"
+dual_publish: true

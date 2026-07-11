@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/order.created/v1.schema.json",
+  "title": "order.created v1 — RED FIXTURE (in-place shape change)",
+  "description": "EXPECTED-FAIL fixture (like the S-T2 backdoor fixture). This is a would-be in-place edit of order.created/v1 that RENAMES payload.customer_id -> payload.user_id and changes payload.item_count from integer to string. Both are non-additive shape changes (D30). `registryctl diff <real v1> <this>` MUST exit nonzero; the pipeline asserts the failure. The correct move for a change like this is a new order.created.v2 topic + dual-publish, exactly as order.paid.v2 demonstrates.",
+  "x-topic": "order.created",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "order.created" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "order" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["order_id", "user_id", "status", "total"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "status": { "type": "string" },
+        "total": {
+          "type": "object",
+          "required": ["amount", "currency"],
+          "properties": {
+            "amount": { "type": "integer" },
+            "currency": { "type": "string" }
+          }
+        },
+        "item_count": { "type": "string" }
+      }
+    }
+  }
+}

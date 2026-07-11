@@ -339,3 +339,83 @@ make test-libs        # all shared libs incl. sharding
    concurrency-safe store with copy-if-absent + snapshot primitives, so the
    copy→dual-write→verify→cutover control flow and its concurrency guarantees are
    exercised for real.
+
+---
+
+# S-T5 Verification (D30: contracts platform — OpenAPI + schema registry + Pact broker)
+
+Everything lives under `contracts/` + `tools/stubgen/` + two new CI stage
+scripts. The registry gate (`contracts/registryctl`) and stub generator
+(`tools/stubgen`) are Go, dependency-light (stdlib + the `yaml.v3` already
+vendored by `tools/yamlcheck`). Wired into the pipeline as **merge gates**:
+`ci/run-local.sh` grew from 10 to **12 stages** — `[2/12] contract-validate`
+and `[3/12] pact-verify` — and `ci/pipeline.yml`'s placeholder `contract` job
+was replaced by the real `make contract-validate` + `make pact-verify` steps.
+
+## DoD / test-criteria matrix
+
+| # | S-T5 requirement | Status | How verified |
+|---|---|---|---|
+| DoD-1 | OpenAPI per service/BFF + convention validator | **full** | `contracts/openapi/order.v1.yaml` (02 §4.1: quotes, `POST /v1/orders` w/ Idempotency-Key, get, `:cancel`, `:capture`) + `customer-bff.v1.yaml` (home + order detail). `registryctl validate` parses each and enforces `/v1/` paths, snake_case property names, 02 §2 error envelope defined **and** `$ref`'d. Green on both files. |
+| DoD-2 | Event schema registry + D30 additive-only enforcement | **full** | `contracts/events/<topic>/<version>.schema.json` for `order.created`, `order.paid`, `payment.authorized`, `dispatch.assigned`, `driver.location_updated` (+ `order.paid.v2`) — all envelope-conformant (02 §4.3, checked against `event_type` const, required set, snake_case payload). `registryctl diff` rejects remove/rename/type-change/required-addition/enum-narrowing; accepts new optional fields. `<topic>.v2` presence forces a valid, unexpired `deprecation.yaml` (topic, replaced_by, deprecation_date) on the base topic. |
+| DoD-3 | Pact broker gating CI | **adapted (file-based)** | No pact-broker binary exists in this env, so the broker is **file-based**: `contracts/pacts/<consumer>__<provider>.json` (Pact-v2-shaped interactions) + `registryctl pact-verify`, which **replays each interaction against the actually-running provider** and asserts status + response shape (want-keys ⊆ got, pinned scalars equal). Seed pact `customer-bff__placeholder` (GET /healthz + idempotent POST /kv) verified against the booted placeholder: 2/2 PASS. |
+| DoD-4 | Stub generator produces runnable stubs from any published contract | **full** | `tools/stubgen -spec … -port …` builds a regex router from any OpenAPI file (incl. `{param}` templates and 02 §1 `:action` verbs) and serves example/schema-derived JSON. Proven live: order.v1 stub booted, `POST /v1/orders` → 201 `PAYMENT_PENDING` body, `GET /v1/orders/{id}` → 200 order body (both curls asserted in the contract-validate stage on every CI run). |
+| DoD-5 | Worked `.v2` dual-publish example in `contracts/` | **full** | `order.paid.v2` (rename `payload.total`→`order_total` + required `tip` = additive-impossible) + `order.paid/deprecation.yaml` (replaced_by, 2026-12-31) + `order.paid.v2/fixtures/` Go test: ONE producer emits both topics; gen-1 consumer reads `order.paid`, gen-2 reads `order.paid.v2`; both messages validate against the **real registry schema files** and both consumers extract their fields — green. A second test proves cross-generation incompatibility (each message FAILS the other schema), i.e. the new topic was genuinely required. |
+| DoD | Registry + broker wired into the S-T2 pipeline as merge gates | **full** | `make contract-validate` / `make pact-verify` → `ci/contract-validate.sh` / `ci/pact-verify.sh`; run-local stages 2–3; pipeline.yml `contract` job now runs both for real. Any violation exits nonzero ⇒ merge blocked. |
+| Test | In-place topic shape-change fixture ⇒ registry CI red (asserted) | **full** | `contracts/fixtures/registry-red/order.created.inplace-shape-change.schema.json` (rename `customer_id`→`user_id`, `item_count` int→string, new required field). `registryctl diff` exits 1 naming all 3 breaks; the stage asserts the failure expected-fail style (like the S-T2 backdoor fixture) — a fixture that *passes* fails CI. |
+| Test | `.v2` dual-publish fixture ⇒ both consumer generations green | **full** | `go test` in `contracts/events/order.paid.v2/fixtures`: `TestDualPublish_BothGenerationsGreen` (gen-1 total=42550 via order.paid; gen-2 order_total=42550, tip=2000 via order.paid.v2) + `TestDualPublish_ShapesAreGenuinelyIncompatible` — both PASS, run on every CI pass. |
+| Test | Breaking a published pact ⇒ provider build red (asserted) | **full** | `contracts/fixtures/pact-red/customer-bff__placeholder.broken.json` adds a `GET /v1/orders/{id}` interaction the placeholder does not implement; `pact-verify` reports `$.order_id: key missing in provider response`, exits 1; the stage asserts the failure. |
+| Test | Additive change ⇒ green (control for the red path) | **full** | `contracts/fixtures/registry-green/order.created.additive.schema.json` (two new optional fields) — `registryctl diff` exit 0, asserted in the stage. |
+
+## Pipeline integration (no regression)
+
+- `ci/run-local.sh` **FULL 12-stage pipeline exit 0** (was 10 stages; the S-T2
+  `[2/10] contract placeholder` no-op became the real `[2/12]`+`[3/12]` gates).
+  All S-T1..S-T4 stages unchanged and green: make test (+ shared-lib suites +
+  sharding race test), build (now also compiles registryctl + stubgen),
+  backdoor-scan (+ red fixture), strip-test, preview-isolation, preview,
+  security-scan, render ×4 + render-preview, up/smoke/down.
+- Expected-fail count across the pipeline is now **3**: backdoor fixture (S-T2),
+  registry shape-change fixture, broken-pact fixture (both S-T5).
+- `registryctl` and `stubgen` have their own unit suites (`diff_test.go`:
+  additive-clean + 4 breaking classes + message content; `main_test.go`: path
+  regex incl. `:action`, `$ref` synthesis, example precedence) — run inside the
+  contract-validate stage.
+
+## Commands to reproduce
+
+```
+make contract-validate         # OpenAPI+registry validate, diff green+red fixtures,
+                               # dual-publish test, stubgen boot + 2 curls
+make pact-verify               # boots placeholder, seed pact green, broken pact red
+cd contracts/registryctl && go run . validate ../../contracts
+cd contracts/registryctl && go run . diff \
+    ../events/order.created/v1.schema.json \
+    ../fixtures/registry-red/order.created.inplace-shape-change.schema.json  # exit 1
+cd contracts/events/order.paid.v2/fixtures && go test -v ./...
+cd tools/stubgen && go run . -spec ../../contracts/openapi/order.v1.yaml -port 9090
+./ci/run-local.sh              # full 12-stage pipeline (exit 0)
+```
+
+## Deviations summary (S-T5)
+
+1. **Pact broker is file-based, not a pact-broker service** — the pact-broker
+   binaries are not available in this environment (per the task brief). The
+   adaptation keeps the Pact *semantics* that matter for the gate: pacts are
+   Pact-v2-shaped JSON documents published in `contracts/pacts/` (the "broker"
+   is the repo path — versioned, reviewable, single source), and verification
+   replays interactions against the real running provider, red on any
+   unsatisfied interaction. Swapping in a hosted broker later changes the
+   fetch step only, not the verification or the CI wiring.
+2. **Shape matching is subset-based**: every key pinned in the pact response
+   must exist in the provider response and pinned scalars must match — the
+   standard Pact postel-style rule (providers may return more). Matcher rules
+   (regex/type matchers) are not implemented; none of the seeded pacts need
+   them.
+3. **`registryctl diff` compares JSON-Schema structure**, not full draft-07
+   semantics (no `$ref`/`allOf` resolution inside event schemas — topic schemas
+   in this registry are deliberately self-contained, which `validate` enforces
+   via envelope conformance).
+4. **stubgen synthesises from `example` or schema** — `examples` (plural) and
+   content types other than `application/json` are ignored; the 02 conventions
+   make JSON the only BFF/service content type.

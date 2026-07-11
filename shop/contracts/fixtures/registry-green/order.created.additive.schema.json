@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/order.created/v1.schema.json",
+  "title": "order.created v1 — GREEN FIXTURE (additive-only)",
+  "description": "A legal in-place evolution of order.created/v1: adds two NEW OPTIONAL payload fields (promo_code, channel). No removals, renames, type changes, or new required fields. `registryctl diff <real v1> <this>` MUST exit 0 (D30-compatible). Pairs with the registry-red fixture to prove the gate accepts additive change and rejects shape change.",
+  "x-topic": "order.created",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "order.created" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "order" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["order_id", "customer_id", "status", "total"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "customer_id": { "type": "string" },
+        "status": { "type": "string" },
+        "total": {
+          "type": "object",
+          "required": ["amount", "currency"],
+          "properties": {
+            "amount": { "type": "integer" },
+            "currency": { "type": "string" }
+          }
+        },
+        "item_count": { "type": "integer" },
+        "promo_code": { "type": "string" },
+        "channel": { "type": "string" }
+      }
+    }
+  }
+}

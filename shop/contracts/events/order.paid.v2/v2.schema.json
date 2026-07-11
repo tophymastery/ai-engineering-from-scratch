@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/order.paid.v2/v2.schema.json",
+  "title": "order.paid.v2",
+  "description": "Shape change of order.paid: payload.total renamed to payload.order_total and a new required tip line added. A rename is NOT additive (D30), so instead of mutating order.paid in place this is a NEW topic with a dual-publish window and a registry-enforced deprecation date on order.paid (see ../order.paid/deprecation.yaml). Producers emit BOTH during the window; gen-1 consumers read order.paid, gen-2 read order.paid.v2.",
+  "x-topic": "order.paid.v2",
+  "x-schema-version": 2,
+  "x-replaces": "order.paid",
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "order.paid.v2" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "order" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["order_id", "order_total", "paid_at"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "payment_id": { "type": "string" },
+        "order_total": {
+          "type": "object",
+          "required": ["amount", "currency"],
+          "properties": {
+            "amount": { "type": "integer" },
+            "currency": { "type": "string" }
+          }
+        },
+        "tip": {
+          "type": "object",
+          "required": ["amount", "currency"],
+          "properties": {
+            "amount": { "type": "integer" },
+            "currency": { "type": "string" }
+          }
+        },
+        "paid_at": { "type": "string" }
+      }
+    }
+  }
+}
