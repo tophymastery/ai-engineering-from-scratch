@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/log-schema.json",
+  "title": "Shop network-log envelope (04 §3)",
+  "description": "The single log envelope emitted by libs/logging at the ingress/egress of every hop. Versioned here and validated in each service's tests (04 §3: 'the standard is enforced, not aspirational').",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ts", "level", "service", "version", "env", "region",
+    "direction", "protocol", "route", "peer", "status", "latency_ms",
+    "bytes_in", "bytes_out", "trace_id", "span_id", "request_id",
+    "actor", "keys", "error"
+  ],
+  "properties": {
+    "ts": { "type": "string", "description": "RFC 3339 UTC timestamp" },
+    "level": { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"] },
+    "service": { "type": "string" },
+    "version": { "type": "string" },
+    "env": { "type": "string", "enum": ["dev", "preview", "staging", "prod", "test"] },
+    "region": { "type": "string" },
+    "direction": { "type": "string", "enum": ["ingress", "egress", "consume", "produce"] },
+    "protocol": { "type": "string", "enum": ["http", "grpc", "kafka"] },
+    "route": { "type": "string" },
+    "peer": { "type": "string" },
+    "status": { "type": "integer" },
+    "latency_ms": { "type": "integer" },
+    "bytes_in": { "type": "integer" },
+    "bytes_out": { "type": "integer" },
+    "trace_id": { "type": "string" },
+    "span_id": { "type": "string" },
+    "request_id": { "type": "string" },
+    "actor": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "type": "string" },
+        "id": { "type": "string", "description": "prefixed ULID only — never PII" }
+      }
+    },
+    "keys": {
+      "type": "object",
+      "description": "business keys as prefixed IDs only — never PII",
+      "additionalProperties": { "type": "string" }
+    },
+    "error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "retryable"],
+      "properties": {
+        "code": { "type": "string" },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}

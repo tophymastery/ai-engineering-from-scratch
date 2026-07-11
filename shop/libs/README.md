@@ -7,3 +7,21 @@ registry), `logging` (the 04 §3 log envelope + per-route sampling classes),
 change under `libs/` triggers a rebuild of **every** buildable module — the
 change-detection rule in `tools/changed-paths.sh` encodes exactly this
 libs-fan-out. S-T1 ships only this placeholder.
+
+## Delivered
+
+| Lib | Task | What | Ext deps |
+|---|---|---|---|
+| [`errors`](errors/) | S-T3 | UPPER_SNAKE code registry + 02 §2 envelope + HTTP mapping | none |
+| [`otel`](otel/) | S-T3 | W3C traceparent extract/inject; trace_id accessors; no-op exporter mode | none |
+| [`logging`](logging/) | S-T3 | 04 §3 envelope middleware (ingress+egress) + sampling classes; schema-validated | none |
+| [`flags`](flags/) | S-T3 | env flags + per-request `X-Flag-Override` (non-prod, testhooks-gated) | testhooks |
+| [`idempotency`](idempotency/) | S-T3 | D9 durable dedupe (UNIQUE-in-txn) + cache + migration helper | pg/sqlite **test-only** |
+| [`testhooks`](testhooks/) | S-T2 | D29 backdoor middleware (build-tag guarded) | none |
+
+`errors`/`otel`/`logging`/`flags` are stdlib-only, so services that ship them add
+zero external attack surface (`ci/security-scan.sh`). `idempotency`'s DB drivers
+(`lib/pq`, `modernc.org/sqlite`) are imported **only in its tests**; the library
+and the reference service compile stdlib-only over `database/sql`. All five are
+exercised end-to-end by `services/_placeholder` (`POST /kv`) and unit-tested via
+`make test-libs`. See [`../VERIFICATION.md`](../VERIFICATION.md) §S-T3.

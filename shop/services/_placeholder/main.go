@@ -1,16 +1,22 @@
-// Command placeholder is the empty-stack stand-in service. For S-T2 it grows
-// two test-only affordances used by the preview + prod-safety harness:
+// Command placeholder is the empty-stack stand-in service and the S-T3
+// REFERENCE SERVICE that exercises all five shared libs end-to-end:
 //
-//   - a tenant-scoped in-memory KV echo store (/kv) keyed by the
-//     X-Preview-Tenant header — proves cross-PR preview isolation (zero bleed).
-//   - a header-echo endpoint (/headers) — lets the gateway strip test assert a
-//     backdoor header never reached upstream.
+//   - libs/otel     — ingress traceparent continuation; trace_id in every log
+//   - libs/logging  — the 04 §3 envelope from shared middleware (ingress),
+//                     read paths sampled, mutations/errors always logged
+//   - libs/errors   — the 02 §2 error envelope + registry HTTP mapping
+//   - libs/flags    — env-backed flags + per-request X-Flag-Override (non-prod)
+//   - libs/idempotency — D9 effect-once on POST /kv (Idempotency-Key required),
+//                     durable via the caller's own transaction; MemStore stands
+//                     in for a service's PG here so the reference needs no DB.
 //
-// It also mounts libs/testhooks middleware (build-tag guarded) so the
-// backdoor-scan covers services, not just the gateway.
+// It also keeps the S-T2 affordances: the tenant-scoped GET /kv echo store
+// (preview isolation), /headers (gateway strip test), and the testhooks
+// middleware (build-tag guarded backdoor scan).
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"log"
@@ -18,14 +24,17 @@ import (
 	"os"
 	"sync"
 
+	shoperr "github.com/shop-platform/shop/libs/errors"
+	"github.com/shop-platform/shop/libs/flags"
+	"github.com/shop-platform/shop/libs/idempotency"
+	"github.com/shop-platform/shop/libs/logging"
+	"github.com/shop-platform/shop/libs/otel"
 	"github.com/shop-platform/shop/libs/testhooks"
 )
 
 const tenantHeader = "X-Preview-Tenant"
 
-// tenantStore is a per-tenant KV map: tenant -> (key -> value). Each preview
-// tenant (pr-<n>) sees only its own namespace, so two PRs mutating the same
-// entity type cannot observe each other's writes.
+// tenantStore is a per-tenant KV map: tenant -> (key -> value).
 type tenantStore struct {
 	mu   sync.RWMutex
 	data map[string]map[string]string
@@ -64,18 +73,62 @@ func main() {
 
 	store := newTenantStore()
 
+	// --- shared libs bootstrap (S-T3) ---
+	logger := logging.New(logging.Config{
+		Service:    name,
+		Version:    envOr("SERVICE_VERSION", "0.0.0-dev"),
+		Env:        envOr("ENV", "dev"),
+		Region:     envOr("REGION", "local"),
+		SampleRate: 1.0, // full logging in dev; prod fleet sets 1–5% on read paths (D27)
+	})
+	flagSet := flags.FromEnv()
+	// D9 idempotency: MemStore stands in for the service's own PG; MemCache
+	// stands in for Redis (advisory). A real slice swaps NewSQLStore(db, pg) +
+	// a Redis-backed cache with zero call-site changes.
+	idem := idempotency.New(idempotency.NewMemStore(), idempotency.NewMemCache())
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": name})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":        "ok",
+			"service":       name,
+			"otel_exporter": otel.ExporterMode(),
+			"flag_override": boolStr(flags.OverrideActive()),
+		})
 	})
 
-	// /kv?key=K[&value=V] — tenant-scoped echo store. With value: set+return.
-	// Without value: read. Tenant comes from X-Preview-Tenant (default "base").
+	// POST /kv — the S-T3 idempotent MUTATION. Requires Idempotency-Key (02 §3);
+	// the write runs exactly once inside the durable transaction (D9), wrapped in
+	// logging + otel + errors + flags. GET /kv keeps the S-T2 echo behaviour.
 	mux.HandleFunc("/kv", func(w http.ResponseWriter, r *http.Request) {
 		tenant := tenantOr(r, "base")
+		if r.Method == http.MethodPost {
+			// Feature-gate the mutation; per-request override honoured in non-prod.
+			if !flagSet.BoolCtx(r.Context(), "kv_v1", true) {
+				shoperr.WriteRequest(w, r, shoperr.New(shoperr.CodeForbidden, "kv_v1 is disabled"), logging.TraceIDFromRequest)
+				return
+			}
+			idem.HTTP(w, r, logging.TraceIDFromRequest, func(ctx context.Context, tx idempotency.Execer, body []byte) (int, []byte, error) {
+				var in struct {
+					Key   string `json:"key"`
+					Value string `json:"value"`
+				}
+				if err := json.Unmarshal(body, &in); err != nil || in.Key == "" {
+					return 0, nil, shoperr.New(shoperr.CodeValidation, `body must be {"key":..,"value":..}`,
+						shoperr.Detail{Field: "key", Reason: "required"})
+				}
+				store.set(tenant, in.Key, in.Value) // the effect — runs exactly once per key
+				resp, _ := json.Marshal(map[string]any{"tenant": tenant, "key": in.Key, "value": in.Value, "op": "set"})
+				return http.StatusCreated, resp, nil
+			})
+			return
+		}
+
+		// GET /kv?key=K[&value=V] — S-T2 tenant echo store (preview isolation).
 		key := r.URL.Query().Get("key")
 		if key == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing key"})
+			shoperr.WriteRequest(w, r, shoperr.New(shoperr.CodeValidation, "missing key",
+				shoperr.Detail{Field: "key", Reason: "required"}), logging.TraceIDFromRequest)
 			return
 		}
 		if val, hasVal := r.URL.Query()["value"]; hasVal {
@@ -88,8 +141,6 @@ func main() {
 	})
 
 	// /headers — echo the backdoor headers this service actually received.
-	// The gateway strip test asserts these are empty when sent through a
-	// prod-mode gateway.
 	mux.HandleFunc("/headers", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"service":         name,
@@ -103,14 +154,27 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]string{"service": name, "path": r.URL.Path, "tenant": tenantOr(r, "")})
 	})
 
-	// testhooks middleware: active only in a `-tags testhooks` build.
-	handler := testhooks.Middleware(mux)
+	// Middleware chain (outer→inner): otel continues the trace so logging can
+	// read trace_id; logging emits the 04 §3 ingress envelope; testhooks (build-
+	// tag guarded) stashes X-Flag-Override for flags.BoolCtx in non-prod builds.
+	handler := otel.Middleware(
+		logger.Middleware(enrich)(
+			testhooks.Middleware(mux)))
 
 	addr := ":" + port
-	log.Printf("placeholder service %q listening on %s (testhooks_compiled=%v)", name, addr, testhooks.Enabled)
+	log.Printf("placeholder service %q on %s (testhooks=%v otel=%s)", name, addr, testhooks.Enabled, otel.ExporterMode())
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("placeholder server exited: %v", err)
 	}
+}
+
+// enrich attaches the tenant as a business key (prefixed/opaque only — never PII)
+// and a route pattern so the log line stays low-cardinality.
+func enrich(r *http.Request, e *logging.Entry) {
+	if t := r.Header.Get(tenantHeader); t != "" {
+		e.Keys["tenant"] = t
+	}
+	e.Route = r.Method + " " + r.URL.Path
 }
 
 func tenantOr(r *http.Request, def string) string {
@@ -118,6 +182,13 @@ func tenantOr(r *http.Request, def string) string {
 		return v
 	}
 	return def
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

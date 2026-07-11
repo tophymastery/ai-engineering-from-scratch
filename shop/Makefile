@@ -5,10 +5,14 @@ SHELL := /usr/bin/env bash
 GO ?= /usr/local/go/bin/go
 KUSTOMIZE ?= $(GO) run sigs.k8s.io/kustomize/kustomize/v5@latest
 OVERLAYS := dev preview staging prod
+# Shared libs (S-T3/S-T4/S-T7). Each is its own module; a libs/ change rebuilds
+# every importer (change-detection fan-out). testhooks is vetted with both tags
+# by the `test` target below.
+LIBS := errors otel logging flags idempotency testhooks
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down seed smoke test render changed build \
+.PHONY: help up down seed smoke test test-libs render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview
 
 help: ## List targets
@@ -21,8 +25,8 @@ up: ## Boot the empty stack (docker-compose, or process fallback) and wait healt
 down: ## Tear the stack down
 	@tools/dev-down.sh
 
-build: ## Compile the gateway + placeholder binaries (prod tags = no testhooks)
-	@cd libs/testhooks && $(GO) build ./...
+build: ## Compile the shared libs + gateway + placeholder binaries (prod tags = no testhooks)
+	@set -e; for l in $(LIBS); do (cd libs/$$l && $(GO) build ./...); done
 	@cd services/_placeholder && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@echo "build ok"
@@ -34,11 +38,21 @@ seed: ## Seed golden datasets (STUB — real seedctl lands in S-T7)
 smoke: ## Run the end-to-end smoke check against the booted stack
 	@tools/smoke.sh
 
-test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture)
+test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) + shared-lib unit tests
 	@cd libs/testhooks && $(GO) vet ./... && $(GO) vet -tags testhooks ./...
 	@cd services/_placeholder && $(GO) vet ./...
 	@cd gateway && $(GO) vet ./...
+	@$(MAKE) --no-print-directory test-libs
 	@tools/changed-paths_test.sh
+
+test-libs: ## Run the S-T3 shared-lib unit tests (errors, otel, logging, flags, idempotency)
+	@set -e; for l in errors otel logging flags idempotency; do \
+	  echo "== go test libs/$$l =="; \
+	  (cd libs/$$l && $(GO) test ./...); \
+	done
+	@echo "== flags: per-request override refused in prod / honoured in non-prod =="
+	@cd libs/flags && $(GO) test ./... && $(GO) test -tags testhooks ./...
+	@echo "test-libs: all shared-lib tests passed"
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
 	@ci/backdoor-scan.sh

@@ -154,3 +154,98 @@ make test                # unit + change-detection (S-T1 fixtures, still green)
    (external-dep surface + in-repo replace check + `go vet`). (Security: adapted.)
 6. Backdoor safety (all three layers) and cross-PR isolation are **fully
    runnable** here — no adaptation.
+
+---
+
+# S-T3 Verification (D9: shared libs — errors, logging/otel, flags, idempotency)
+
+Five shared libs under `libs/` (`errors`, `otel`, `logging`, `flags`,
+`idempotency`), each with a README and exercised end-to-end by the reference
+service `services/_placeholder` (`POST /kv`). Same environment realities as
+S-T1/S-T2, plus:
+
+- **Go module downloads work** through the proxy: `idempotency` uses `lib/pq` +
+  `modernc.org/sqlite` **in tests only** (pinned to go-1.24-compatible versions:
+  sqlite v1.34.5 / libc v1.61.13 / x-sys v0.28.0, so nothing forces a toolchain
+  switch). The library itself and the reference service compile stdlib-only over
+  `database/sql`; `errors`/`otel`/`logging`/`flags` are stdlib-only.
+
+## DB path used: **FULL** (real ephemeral PostgreSQL)
+
+No Docker daemon, but a **PostgreSQL 16 server binary is present**
+(`/usr/lib/postgresql/16/bin`). The idempotency test harness starts an
+**ephemeral PG over a unix socket** (run as the `postgres` OS user via `sudo`,
+since PG refuses to run as root), migrates the D9 table, and runs the full
+concurrency suite against it. The SAME suite also runs against **SQLite**
+(`modernc`, pure-Go) and the transactional **MemStore** — proving the semantics
+are the store's, not one engine's. If PG can't start (no binary / no sudo), the
+harness logs a skip and runs on SQLite + MemStore (the documented fallback); set
+`IDEMPOTENCY_SKIP_PG=1` to force it. The production DDL is PG-specific
+(`libs/idempotency/migrations/0001_idempotency.pg.sql`); the store is
+engine-agnostic over `database/sql` via a `Dialect`.
+
+## DoD / test-criteria matrix
+
+| # | S-T3 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | All five libs merged with docs + a reference service exercising each | **full** | 5 libs + READMEs; `services/_placeholder` wraps `POST /kv` in otel+logging+errors+flags+idempotency. Live run: fresh→201, replay→201+`Idempotency-Replayed: true`, diff-body→409, missing-key→400, error envelope carries the otel `trace_id`. |
+| DoD-2a | Log-schema test validates the envelope | **full** | `contracts/log-schema.json` (draft-07) + `logging` emits real lines through the ingress middleware; all validate. Negative test: bad `level`/missing fields are rejected (validator can fail). |
+| DoD-2b | Flag override works per-request in non-prod | **full** | Non-prod build (`-tags testhooks`): `FLAG_KV_V1=false`→403; `X-Flag-Override: kv_v1=true`→201. Prod build: same header→**still 403** (refused); `/healthz` reports `flag_override` true/false. `flags_test.go` asserts both build tags. |
+| DoD-3 | Idempotency migration helper shipped | **full** | `idempotency.Migrate(ctx,db,dialect)` + `Schema()` + `migrations/0001_idempotency.pg.sql`; applied in every SQL test. |
+| Test | 100 concurrent same-key ⇒ exactly 1 effect + 99 replays | **full** | `TestStormExactlyOnce` on **postgres + sqlite + mem**: 1 effect (cross-checked against the durable `effects` table) + 99 replays, 0 errors. |
+| Test | Cache killed mid-storm ⇒ still exactly 1 effect | **full** | `TestStormCacheKilledMidway`: `SwappableCache.Drop()` at the 50th request (Redis-failover sim) ⇒ 1 effect + 99 replays on all 3 backends. Correctness comes from the UNIQUE constraint, not the cache. |
+| Test | Same key + different body ⇒ 409 on 100% | **full** | `TestSameKeyDifferentBody409`: 100/100 ⇒ `409 IDEMPOTENCY_KEY_REUSED` on all 3 backends; effect count stays 1. |
+| Test | Cold-cache p99 penalty < +20 ms | **full** | `TestColdCacheReplayP99Penalty` (300 replays warm vs cold). Measured below — all ≪ 20 ms. |
+
+## Measured numbers
+
+| Metric | postgres (ephemeral) | sqlite (modernc) | mem |
+|---|---|---|---|
+| Storm: effects / replays | 1 / 99 | 1 / 99 | 1 / 99 |
+| Cache-killed storm: effects / replays | 1 / 99 | 1 / 99 | 1 / 99 |
+| Different body ⇒ 409 rate | 100/100 | 100/100 | 100/100 |
+| Replay p99 — warm (cache hit) | ~0.000 ms | ~0.000 ms | ~0.000 ms |
+| Replay p99 — cold (DB re-read) | **1.154 ms** | 0.117 ms | 0.012 ms |
+| **Cold-cache p99 penalty** (budget < +20 ms) | **+1.154 ms** ✓ | +0.117 ms ✓ | +0.012 ms ✓ |
+| Full `go test` (all 5 libs, incl. PG bring-up) | — | — | ~4.2 s |
+
+## Pipeline integration (no regression)
+
+- `make build` now compiles all 5 libs (prod tags); `make test` runs `go vet` +
+  `make test-libs` (all lib unit tests, both build tags for `flags`) +
+  change-detection. **`./ci/run-local.sh` → all 10 stages green, exit 0.**
+- `services/_placeholder`'s `go.mod` stays **stdlib-only + in-repo requires**
+  (drivers are idempotency test-only deps, pruned from the service build), so the
+  `ci/security-scan.sh` offline lint (which scans the shipped binaries incl.
+  placeholder) still passes with zero external surface.
+- Prod backdoor scan still clean: placeholder now imports `flags`→`testhooks`,
+  but the marker/symbol appear only under `-tags testhooks`. `make backdoor-scan`
+  green (prod 0 markers; `--fixture` red).
+
+## Commands to reproduce
+
+```
+make test-libs                 # all 5 libs (idempotency spins up ephemeral PG)
+make build                     # compile libs + gateway + placeholder (prod tags)
+cd libs/idempotency && go test -v ./...              # full DB suite (PG+sqlite+mem)
+cd libs/idempotency && IDEMPOTENCY_SKIP_PG=1 go test ./...   # sqlite+mem fallback
+cd libs/flags && go test ./... && go test -tags testhooks ./...  # prod + non-prod
+./ci/run-local.sh              # full 10-stage pipeline (still exit 0)
+```
+
+## Deviations summary (S-T3)
+
+1. **DB path is FULL, not adapted** — the concurrency criteria run against a real
+   ephemeral PostgreSQL (primary), with SQLite + MemStore as additional
+   cross-checks. No production-semantics gap.
+2. **DB drivers are test-only** — kept out of the shipped `services/_placeholder`
+   binary so the security-scan's zero-external-surface invariant holds; the
+   reference service exercises idempotency via the pure-Go `MemStore` (a real
+   transactional store with UNIQUE-violation simulation), while the SQL durable
+   path is proven by the lib's own PG/SQLite tests.
+3. **`go test ./libs/...`** — libs are independent modules (per the repo's
+   one-module-per-dir convention), so there is no single root module; `make
+   test-libs` runs every lib's tests. All green.
+4. **OTLP exporter** — no collector in this env, so `libs/otel` runs in its
+   documented **no-op-exporter** mode; the W3C propagation logic (the real,
+   load-bearing part) is fully tested.
