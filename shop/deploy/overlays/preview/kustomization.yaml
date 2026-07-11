@@ -1,0 +1,19 @@
+# preview overlay: per-PR shared-preview target (S-T2). Single replicas, cheap.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namePrefix: preview-
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      env-name: preview
+    includeSelectors: false
+
+replicas:
+  - name: gateway
+    count: 1
+  - name: placeholder
+    count: 1

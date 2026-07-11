@@ -1,0 +1,19 @@
+# prod overlay: promotion target (04 §1.3), canary-rolled. Highest redundancy.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namePrefix: prod-
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      env-name: prod
+    includeSelectors: false
+
+replicas:
+  - name: gateway
+    count: 3
+  - name: placeholder
+    count: 3

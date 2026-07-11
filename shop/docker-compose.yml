@@ -1,0 +1,38 @@
+# Canonical local-stack definition for S-T1: gateway + one placeholder service,
+# both with container-native healthchecks. This is the source of truth for the
+# empty stack. NOTE: in environments without a working Docker daemon, `make up`
+# falls back to a process-based boot (compile & run the binaries directly) that
+# mirrors this topology; see shop/VERIFICATION.md.
+services:
+  placeholder:
+    build:
+      context: ./services/_placeholder
+    environment:
+      PORT: "8081"
+      SERVICE_NAME: "placeholder"
+    healthcheck:
+      # Distroless has no shell/curl; the binary answers /healthz, so we probe
+      # from the gateway instead and keep this as a TCP-style readiness note.
+      test: ["CMD", "/placeholder", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    expose:
+      - "8081"
+
+  gateway:
+    build:
+      context: ./gateway
+    environment:
+      PORT: "8080"
+      PLACEHOLDER_URL: "http://placeholder:8081"
+    depends_on:
+      placeholder:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    ports:
+      - "8080:8080"
