@@ -47,7 +47,11 @@ services:
   # singleflight/Redis cache). The gateway routes /customer-bff/v1/customer/home +
   # /v1/customer/merchants/* here. `make e2e-sync` promotes it stub->real.
   - { name: feed-cache,        port: 8116, mode: stub, contract: contracts/openapi/feed-cache.v1.yaml,        real_cmd: "bash tools/feed-cache-realcmd.sh" }
-  - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "" }
+  # cart is the V-T7 slice: real_cmd boots the built cart binary
+  # (tools/cart-realcmd.sh, cart_v1 on; CATALOG_URL->merchant-catalog slot for the
+  # add-time item-validation read; consumes menu.updated via /v1/menu-events).
+  # `make e2e-sync` promotes it stub->real once the binary builds.
+  - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "bash tools/cart-realcmd.sh" }
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }
   - { name: pricing-promo,     port: 8107, mode: stub, contract: contracts/openapi/pricing-promo.v1.yaml,     real_cmd: "" }

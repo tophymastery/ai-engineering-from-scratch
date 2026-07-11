@@ -1,4 +1,4 @@
-# Verification (S-T1–S-T8, V-T1–V-T6)
+# Verification (S-T1–S-T8, V-T1–V-T7)
 
 How each Definition-of-Done item and test criterion was verified **in this
 environment**, and where the environment forced an adaptation. Legend:
@@ -1328,3 +1328,148 @@ make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down   # browse SWR c
    tiers) exists and is unit-tested, but the slice bounds staleness with TTLs (the
    D11 "Redis 10 s" window) rather than consuming `menu.updated` events; wiring the
    invalidation consumer is a follow-up (the in-memory eventbus is the drop-in).
+
+---
+
+# V-T7 Verification (Cart slice — base blueprint, 01 §1: per-user carts, item validation against catalog, Redis snapshot + PG)
+
+One service — `cart` — owns per-user carts backed by a **Redis snapshot over a
+durable PostgreSQL store**, exposes add/remove/get (via customer-bff) under
+**ETag/If-Match optimistic concurrency** (02 §1 → **412 on stale write**),
+validates + prices line items against the **merchant-catalog** contract at add
+time (the `cart → merchant-catalog` pact), and **revalidates** them by consuming
+`menu.updated` events (02 §4.3) — a merchant's price change or an item going
+unavailable is reflected in affected carts within the freshness window. Same
+environment realities as V-T1–V-T6 (no Docker daemon → process-mode E2E; no K8s
+cluster → manifests render-only; **no Redis daemon → an in-process TTL store with
+the same fresh/miss semantics stands in for the snapshot tier**; **no live Kafka
+→ the in-memory eventbus + inbox carry `menu.updated`**, with an HTTP inject
+endpoint standing in for cross-process delivery in the shared E2E env). **Every
+correctness property — 412 on a stale ETag (exactly one winner under a 100-writer
+race), snapshot/rehydrate from PG, menu-change revalidation reflected over the
+REAL bus within the window, exactly-once + LWW consumption — runs for real under
+`-race`;** only raw throughput scale is adapted and disclosed per row.
+
+## What "ETag concurrency" + "menu revalidation" mean here (FULL correctness)
+
+The cart is a mutable resource carrying a monotonic `version`. Each read returns
+a strong `ETag` (SHA-256 over `cart:cart_id:version`) as a header and in the
+body. An add/remove on an existing cart **requires** `If-Match`; the write runs
+inside a DB transaction that (a) checks `If-Match` against the current ETag and
+(b) does a compare-and-swap `UPDATE carts SET version=<read>+1 WHERE
+version=<read>` — so under any concurrency exactly one writer commits and every
+stale writer gets **412 STALE_WRITE** (first add is exempt — it bootstraps the
+cart). **Revalidation:** a `menu.updated` event is applied exactly-once through
+the inbox (redelivery = no-op) with last-write-wins by menu `version` (an older
+snapshot can't roll a cart back); it reprices / flags every affected cart line and
+**eagerly invalidates** the cart's snapshot, so the next read rehydrates the
+repriced PG state. The **snapshot TTL (5 s)** independently bounds staleness — a
+snapshot not eagerly invalidated is re-derived from PG within the window. This is
+the real mechanism, run under `-race` and over the real `eventbus.MemBroker` on
+every CI pass.
+
+## Store / bus adaptations (disclosed)
+
+The **"Redis snapshot" tier is an in-process `snapshotStore`** (`snapshot.go`)
+standing in for Redis — no daemon in this sandbox. It implements the same
+fresh/miss TTL contract a Redis `SET cart:<id> <json> EX <ttl>` gives, read under
+the injected Clock, with explicit invalidation on a menu-change revalidation. The
+**PG store is in-memory SQLite** (modernc, pure-Go) in tests; the production
+schema is `migrations/0001_cart.pg.sql` (the ETag/version CAS + revalidation SQL
+is engine-agnostic). The **`menu.updated` bus is the in-memory `eventbus` +
+`inbox`** (no live Kafka); the revalidation test publishes through a real
+`MemBroker` → `Subscribe` → the cart consumer (genuine event→reflected), and the
+shared E2E env delivers the stub event via a `POST /v1/menu-events` inject
+endpoint (the same consumer, the cross-process seam a real Kafka consumer fills).
+The **5k RPS** scale is adapted (§rows below): per-op p99 is **full** (real,
+measured), a literal sustained 5k RPS is not reachable in-sandbox, so throughput
+is proven by per-op p99 + a 64-client concurrency burst.
+
+## DoD / test-criteria matrix
+
+| # | V-T7 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `cart_v1` on) | **full (adapted boot)** | `make e2e-sync` swaps `cart` → real (cart_v1 on; `CATALOG_URL`→merchant-catalog slot; short snapshot TTL); `make e2e-smoke` runs **80/80** incl. **10 new V-T7 assertions [71–80] through the customer-bff passthrough**: seed a catalog item → cart **add ⇒ subtotal 16000 + strong ETag** → GET cart returns that ETag → second add mints a NEW ETag → **stale add ⇒ 412 STALE_WRITE** (+ envelope) → missing-If-Match ⇒ 428 → publish `menu.updated` ⇒ **subtotal 16000→18000 reflected in 10 ms (< 5s)** → item-unavailable `menu.updated` ⇒ **line flagged + dropped from subtotal**. Gateway routes `/customer-bff/v1/carts*` → cart. Process-mode boot (no Docker). V-T7 section skips unless cart+merchant-catalog are both real (all-stubs / partial-mix smoke unaffected). |
+| DoD-2 | Four test levels green (unit/contract/integration/E2E) | **full** | **Unit/integration:** `services/cart` `go test -race` (17 tests: add/get/remove lifecycle, stale-write 412, If-Match-required 428, **100-writer concurrent-add fixture**, ETag chaining, item-unavailable/not-in-menu/unknown-merchant, flag gate, not-found; menu-change reflected-<5s over the real bus, unavailable-flag, exactly-once, LWW stale-version-ignored, snapshot-TTL bound; snapshot serve→rehydrate, rehydrate-reflects-repriced-PG, PG-system-of-record; schema-valid consume). **Contract:** `cart.v1.yaml` grown additively (get + delete + richer Cart) + customer-bff cart paths, both pass `registryctl validate`; consumed `menu.updated` validated against the published draft-07 schema (`TestConsumedMenuUpdatedIsSchemaValid`). **Integration:** `ci/pact-verify.sh` verifies the `cart → merchant-catalog` pact against the REAL catalog. **E2E:** the e2e-smoke section above. |
+| DoD-2b | Pact for the catalog consumer (cart validates items against catalog) | **full (file-based broker)** | `contracts/pacts/cart__merchant-catalog.json` (item price + availability read) verified by `registryctl pact-verify` **against the REAL merchant-catalog** booted by `ci/pact-verify.sh` (**cart 1/1 PASS**); the async `menu.updated` contract cart subscribes to is additionally pinned by the JSON schema + `registryctl validate` + the schema-valid-consume unit test. |
+| DoD | Dashboards + alerts live; SLO + runbook + `ownership.yaml` | **full (alerts/dash render-only)** | `deploy/alerts/cart.yaml` (cart-ops p99, menu-revalidation lag, snapshot hit-rate, stale-write ratio) + `deploy/dashboards/cart.json` — both parsed by `make render-cart`; `deploy/base/cart` (Deployment+Service) renders via kustomize. `docs/runbooks/cart.md` (SLOs + invariants + alert actions + rollout + adaptations). `ownership.yaml`: `cart → Marketplace, V-T7` (already present, verified correct). |
+| Test | Cart ops p99 < 100 ms at 5k RPS | **adapted (throughput) / full (latency)** | Real per-op latency through the full HTTP+snapshot+store path (`TestPerf_CartOps_P99`, no -race): **add p99 = 460 µs, get p99 = 68 µs, remove p99 = 390 µs** over 3000 ops each — all ≪ 100 ms. Concurrent **burst** (64 clients × 40 adds = 2560 ops): **p99 ≈ 33 ms** < 100 ms. Scale adaptation: a literal sustained 5k RPS is unreachable in this sandbox (single-writer in-memory SQLite, no cluster), so the budget is proven by measured per-op p99 + a contended burst, not a 60 s soak. Numbers NOT fabricated — printed by the test. |
+| Test | Menu-change revalidation reflected < 5 s | **full** | `TestMenuChangeRevalidationReflectedWithin5s` (`-race`): a `menu.updated` (price 8000→9000) published over the REAL `eventbus.MemBroker` → cart consumer → subtotal **16000 → 18000**; propagation measured on the FROZEN clock (event `occurred_at` → observed after a 1.5 s simulated delivery advance) = **1.5 s < 5 s** (advance time, never sleep). `TestSnapshotTTLBoundsReflection` proves the 5 s TTL bounds staleness independently (stale within 4 s, reflected at 6 s). E2E [79]: reflected in **10 ms** end-to-end. `TestMenuChangeUnavailableFlagsLine`: an item going unavailable drops out of the subtotal. |
+| Test | Concurrent-edit: 100% of stale writes rejected with 412 | **full** | `TestConcurrentAddFixture` (`-race`): **100 concurrent adds** all holding the same v1 ETag → **exactly 1 accepted (200), 99 rejected 412 STALE_WRITE, 0 other**. Also `TestStaleWrite412`/`TestSequentialEditsChainETags` and e2e [75]/[76]. **100% of stale writes rejected with 412.** |
+| Test | Redis snapshot + PG (snapshot/rehydrate path) | **full** | `TestSnapshotServesThenRehydrates` (`-race`): first read populates the snapshot → repeat read is a **HIT** (no rehydrate) → snapshot evicted (simulated Redis flush) → next read **rehydrates from PG exactly once**, identical ETag + subtotal. `TestRehydrateReflectsRepricedPG` (snapshot never masks the durable store) + `TestPGIsSystemOfRecord` (every line reconstructable from PG alone). |
+
+## Measured numbers
+
+| Metric | Value |
+|---|---|
+| cart `go test -race` | ok (17 tests, incl. 100-writer concurrent-add fixture + bus revalidation + snapshot/rehydrate) |
+| Concurrent-add fixture | 100 writers → **1 accepted, 99 × 412 STALE_WRITE, 0 other** (100% stale rejected) |
+| Cart add p99 (3000 ops) | **460 µs** (budget 100 ms) |
+| Cart get p99 (3000 ops) | **68 µs** (budget 100 ms) |
+| Cart remove p99 (3000 ops) | **390 µs** (budget 100 ms) |
+| Cart add p99 under burst (64 clients × 40) | **≈ 33 ms** (budget 100 ms) |
+| Menu-change revalidation reflected (unit, over the bus, frozen clock) | subtotal 16000 → 18000; propagation **1.5 s < 5 s** |
+| Menu-change revalidation reflected (e2e, end-to-end) | **10 ms** (subtotal 16000 → 18000) |
+| Exactly-once + LWW consume | 5× redelivery → **1** applied; stale v2 after v3 → **ignored** |
+| Snapshot/rehydrate | repeat read = HIT (0 rehydrate); post-eviction read = **1** PG rehydrate, identical view |
+| Consumed menu.updated schema-valid | validated against contracts/events/menu.updated/v1.schema.json (`TestConsumedMenuUpdatedIsSchemaValid`) |
+| Contract validate | cart.v1.yaml + customer-bff.v1.yaml (cart paths) OK (22 OpenAPI) |
+| Pact | cart → merchant-catalog **1/1** vs the REAL service |
+| Kustomize render | `make render-cart` → 2 docs (Deployment+Service) + alerts + dashboard, yamlcheck OK |
+| E2E smoke | **80/80** (10 new V-T7 assertions via customer-bff); V-T3–V-T6 stay green; all-stubs unaffected (V-T7 skips unless cart+catalog real) |
+| Full `./ci/run-local.sh` | **exit 0** (V-T7 wired into make test, build, contract-validate, pact-verify, render-cart, e2e-smoke) |
+
+## Commands to reproduce
+
+```
+cd services/cart && go test -race -count=1 ./...          # ETag 412 fixture + snapshot/rehydrate + bus revalidation (<5s) + exactly-once/LWW + schema-valid
+cd services/cart && go test -count=1 -run TestPerf ./...  # perf criteria (no -race): add/get/remove p99 + concurrency burst
+make contract-validate       # cart.v1 + customer-bff cart paths + menu.updated schema
+make pact-verify             # cart -> merchant-catalog pact vs the REAL merchant-catalog
+make render-cart             # cart base (Deployment+Service) + alerts + dashboard
+make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down   # add->get ETag + 412 stale write + menu-change revalidation demo (80/80)
+./ci/run-local.sh            # FULL pipeline incl. all V-T7 gates — exits 0
+```
+
+## Deviations summary (V-T7)
+
+1. **5k RPS sustained → per-op p99 + contended burst.** Throughput scale is
+   adapted (single-writer in-memory SQLite, no cluster); the *latency* is real and
+   measured (add p99 460 µs, get 68 µs, remove 390 µs, burst ≈ 33 ms — all under
+   the 100 ms budget). The literal 5k-RPS soak is the seam a load harness (V-T31)
+   fills; the per-op budget is met with wide margin.
+2. **"Redis snapshot" tier → in-process `snapshotStore`.** No Redis daemon
+   in-sandbox; the store implements the same fresh/miss TTL contract under the
+   injected Clock, with explicit invalidation on revalidation. The snapshot/rehydrate
+   logic — the correctness of the tier — is real and tested (serve→evict→rehydrate,
+   PG-is-system-of-record).
+3. **`menu.updated` bus → in-memory eventbus + inbox + HTTP inject.** No live
+   Kafka; the revalidation unit test publishes over a real `MemBroker` →
+   `Subscribe` → the cart consumer (genuine event→reflected), and the E2E env
+   delivers the stub event through `POST /v1/menu-events` (the same consumer). The
+   consumer is exactly-once (inbox dedupe) + LWW (by menu `version`), proven under
+   `-race`. Wiring a cross-process Kafka subscription is the drop-in the seam fills.
+4. **Store is in-memory SQLite** (modernc, pure-Go); the production schema is
+   `migrations/0001_cart.pg.sql`. The ETag/version CAS + revalidation SQL is
+   engine-agnostic and fully exercised.
+5. **BFF is the gateway passthrough** (customer-bff slot is a contract stub, as in
+   V-T1/V-T2/V-T4/V-T6): the gateway routes `/customer-bff/v1/carts*` → cart, with
+   ETag/If-Match flowing through the reverse proxy untouched. The request/response
+   contract is the stable shape a real customer-bff slice will front later
+   (additive-only, D30). Documented in `customer-bff.v1.yaml` + `cart.v1.yaml`.
+6. **`merchant_id` is an additive add-body field** (D30): cart needs the merchant
+   to validate + price a line against the catalog menu (the pact read). The
+   original `{item_id, quantity}` stub body is preserved; `merchant_id` is added
+   optionally per the additive-only rule.
+7. **Perf tests are tagged `//go:build !race`** and run in a dedicated non-race
+   pass (`make test-cart-perf`): race instrumentation (~10×) plus the single-writer
+   SQLite connection would report sandbox-bound latencies. The concurrency
+   *correctness* proof (100% stale writes → 412) DOES run under `-race`.
+8. **Revalidation does NOT bump the cart version/ETag.** A `menu.updated` reprice
+   is server-side pricing, not a user edit, so a client's outstanding `If-Match`
+   stays valid across a revalidation; only add/remove bump the version. The subtotal
+   reflects the new prices on the next read.
+9. **`cart_v1` default is env-driven** (`FLAG_CART_V1`), OFF in the prod overlay
+   and ON in the e2e realcmd — the flag gates the whole mutating surface (reads of
+   an existing cart still work; adds/removes return 404 CART_DISABLED when dark).
+   Per-request `X-Flag-Override` is honoured only in non-prod builds (testhooks).

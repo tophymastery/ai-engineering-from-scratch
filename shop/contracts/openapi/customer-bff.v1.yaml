@@ -80,6 +80,89 @@ paths:
                         available: { type: boolean }
         default:
           $ref: "#/components/responses/Error"
+  # --- V-T7 cart passthroughs. The customer app adds/removes/reads its cart
+  # through the BFF. IMPLEMENTATION NOTE: the E2E BFF slot is a contract stub, so
+  # today the GATEWAY routes /customer-bff/v1/carts* DIRECTLY to the cart slot
+  # (gateway/main.go bffsWithCartPassthrough); ETag/If-Match flow through the
+  # reverse proxy untouched (02 §1 concurrency preserved). Same discover-from-
+  # route-table lifecycle as the auth/profile/catalog/browse passthroughs above;
+  # behind the `cart_v1` flag. Additive-only (D30). See contracts/openapi/cart.v1.yaml.
+  /v1/carts/{cart_id}:
+    get:
+      operationId: get_cart_via_bff
+      summary: Read the customer's cart (passthrough to cart) — returns the current ETag.
+      parameters:
+        - name: cart_id
+          in: path
+          required: true
+          schema: { type: string, example: "crt_01H8XGJ2Q" }
+      responses:
+        "200":
+          description: The cart (ETag header carries the current validator).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/carts/{cart_id}/items:
+    post:
+      operationId: add_cart_item_via_bff
+      summary: Add an item to the cart (passthrough to cart) — If-Match once the cart exists → 412 on stale.
+      parameters:
+        - name: cart_id
+          in: path
+          required: true
+          schema: { type: string, example: "crt_01H8XGJ2Q" }
+        - name: If-Match
+          in: header
+          required: false
+          description: The cart's current ETag (02 §1); required on an existing cart, stale ⇒ 412.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item_id, quantity]
+              properties:
+                item_id: { type: string, example: "itm_01H8XG1" }
+                merchant_id: { type: string, example: "mer_01H8XG" }
+                quantity: { type: integer, example: 2 }
+      responses:
+        "200":
+          description: Updated cart (new ETag header).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/carts/{cart_id}/items/{item_id}:
+    delete:
+      operationId: remove_cart_item_via_bff
+      summary: Remove a line from the cart (passthrough to cart) — If-Match required → 412 on stale.
+      parameters:
+        - name: cart_id
+          in: path
+          required: true
+          schema: { type: string, example: "crt_01H8XGJ2Q" }
+        - name: item_id
+          in: path
+          required: true
+          schema: { type: string, example: "itm_01H8XG1" }
+        - name: If-Match
+          in: header
+          required: false
+          description: The cart's current ETag (02 §1); required, stale ⇒ 412.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Updated cart (new ETag header).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        default:
+          $ref: "#/components/responses/Error"
   /v1/customer/orders/{order_id}:
     get:
       operationId: get_order_detail
@@ -398,6 +481,30 @@ components:
         store_name: { type: string }
         eta_minutes: { type: integer }
         created_at: { type: string }
+    CartItem:
+      type: object
+      required: [item_id, quantity]
+      properties:
+        item_id: { type: string }
+        merchant_id: { type: string }
+        name: { type: string }
+        unit_price: { $ref: "#/components/schemas/Money" }
+        quantity: { type: integer }
+        available: { type: boolean }
+        line_total: { $ref: "#/components/schemas/Money" }
+        menu_version: { type: integer }
+    Cart:
+      type: object
+      required: [cart_id, items]
+      properties:
+        cart_id: { type: string }
+        version: { type: integer }
+        etag: { type: string }
+        currency: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CartItem" }
+        subtotal: { $ref: "#/components/schemas/Money" }
     Error:
       type: object
       required: [error]

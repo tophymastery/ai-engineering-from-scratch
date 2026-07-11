@@ -1,24 +1,49 @@
-# cart.v1 — minimal S-T8 topology contract (01 §1 `cart`).
-# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T7 merges.
-# Grows additively per D30. Conventions (02 §1): /v1 paths, snake_case fields,
-# the 02 §2 error envelope on every non-2xx.
+# cart.v1 — the V-T7 cart contract (01 §1 `cart`: per-user carts, item validation
+# against catalog, Redis snapshot + PG). Grown ADDITIVELY from the minimal S-T8
+# stub surface per D30 (the original add-item operation + example are preserved).
+# Conventions (02 §1): /v1 paths, snake_case fields, the 02 §2 error envelope on
+# every non-2xx, ETag/If-Match optimistic concurrency on the mutable cart.
 openapi: 3.0.3
 info:
   title: cart
-  version: "1.0.0"
-  description: Per-user carts (01 §1). Minimal E2E stub surface — add item.
+  version: "1.1.0"
+  description: >
+    Per-user carts (01 §1). Add / remove / get line items under ETag/If-Match
+    optimistic concurrency; line items are validated + priced against the
+    merchant-catalog contract at add time and revalidated on menu.updated.
 servers:
   - url: https://api.shop.io
 paths:
+  /v1/carts/{cart_id}:
+    get:
+      operationId: get_cart
+      summary: Read a cart (returns the current ETag for a subsequent If-Match edit).
+      parameters:
+        - $ref: "#/components/parameters/CartId"
+      responses:
+        "200":
+          description: The cart.
+          headers:
+            ETag:
+              description: Strong validator for the cart's current version (02 §1). Echo it verbatim in If-Match.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        default:
+          $ref: "#/components/responses/Error"
   /v1/carts/{cart_id}/items:
     post:
       operationId: add_cart_item
-      summary: Add an item to a cart (revalidated against catalog in V-T7).
+      summary: Add an item to a cart (validated + priced against catalog; revalidated on menu.updated).
+      description: >
+        The first add creates the cart (no If-Match). A subsequent add on an
+        existing cart REQUIRES If-Match carrying the cart's current ETag; a stale
+        value is rejected 412 STALE_WRITE (02 §1). The item is validated + priced
+        against merchant-catalog; an unavailable item is rejected 422.
       parameters:
-        - name: cart_id
-          in: path
-          required: true
-          schema: { type: string, example: "crt_01H8XGJ2Q" }
+        - $ref: "#/components/parameters/CartId"
+        - $ref: "#/components/parameters/IfMatch"
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
@@ -29,22 +54,67 @@ paths:
               required: [item_id, quantity]
               properties:
                 item_id: { type: string, example: "itm_01H8XG1" }
+                # merchant_id is additive (D30): the menu the line is validated +
+                # priced against. Required in practice for validation.
+                merchant_id: { type: string, example: "mer_01H8XG" }
                 quantity: { type: integer, example: 2 }
       responses:
         "200":
           description: Updated cart.
+          headers:
+            ETag:
+              description: The cart's NEW strong validator after the accepted add.
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Cart" }
               example:
                 cart_id: "crt_01H8XGJ2Q"
+                version: 2
+                etag: "\"9f2a…\""
+                currency: "THB"
                 items:
-                  - { item_id: "itm_01H8XG1", quantity: 2 }
+                  - { item_id: "itm_01H8XG1", merchant_id: "mer_01H8XG", name: "Som Tam", unit_price: { amount: 8000, currency: "THB" }, quantity: 2, available: true, line_total: { amount: 16000, currency: "THB" }, menu_version: 1 }
                 subtotal: { amount: 16000, currency: "THB" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/carts/{cart_id}/items/{item_id}:
+    delete:
+      operationId: remove_cart_item
+      summary: Remove a line item from a cart (If-Match required → 412 on stale).
+      parameters:
+        - $ref: "#/components/parameters/CartId"
+        - name: item_id
+          in: path
+          required: true
+          schema: { type: string, example: "itm_01H8XG1" }
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Updated cart.
+          headers:
+            ETag:
+              description: The cart's NEW strong validator after the accepted remove.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
         default:
           $ref: "#/components/responses/Error"
 components:
   parameters:
+    CartId:
+      name: cart_id
+      in: path
+      required: true
+      schema: { type: string, example: "crt_01H8XGJ2Q" }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: The cart's current ETag (02 §1). Required on a mutating edit of an existing cart; a stale value ⇒ 412 STALE_WRITE.
+      schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -63,12 +133,21 @@ components:
       required: [item_id, quantity]
       properties:
         item_id: { type: string }
+        merchant_id: { type: string }
+        name: { type: string }
+        unit_price: { $ref: "#/components/schemas/Money" }
         quantity: { type: integer }
+        available: { type: boolean, description: "Last-revalidated availability; a menu.updated can flip it. An unavailable line is excluded from subtotal." }
+        line_total: { $ref: "#/components/schemas/Money" }
+        menu_version: { type: integer, description: "Catalog menu version the line was priced against (LWW)." }
     Cart:
       type: object
       required: [cart_id, items]
       properties:
         cart_id: { type: string }
+        version: { type: integer, description: "Monotonic version; drives the ETag." }
+        etag: { type: string }
+        currency: { type: string }
         items:
           type: array
           items: { $ref: "#/components/schemas/CartItem" }
@@ -94,7 +173,7 @@ components:
             retryable: { type: boolean }
   responses:
     Error:
-      description: "The 02 §2 error envelope — returned on every non-2xx."
+      description: "The 02 §2 error envelope — returned on every non-2xx (e.g. 412 STALE_WRITE, 428 IF_MATCH_REQUIRED, 422 ITEM_UNAVAILABLE, 404 CART_NOT_FOUND)."
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
