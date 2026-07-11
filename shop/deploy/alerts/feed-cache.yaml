@@ -1,0 +1,61 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: feed-cache
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: discovery
+    slice: V-T6
+    decisions: D11,D17
+spec:
+  groups:
+    # SLOs (V-T6):
+    #   - merchant-page origin (catalog) load <= 1 QPS under any read volume
+    #     (two-tier singleflight/Redis collapse) — the STAMPEDE alert
+    #   - geo-tile feed cache hit rate >= 85% at peak (stale-while-revalidate)
+    - name: feed-cache.stampede
+      rules:
+        - alert: FeedCacheMerchantOriginStampede
+          expr: sum(rate(feedcache_merchant_origin_fetches_total[1m])) by (region) > 1
+          for: 2m
+          labels:
+            severity: critical
+            team: discovery
+          annotations:
+            summary: "merchant-page origin (catalog) > 1 QPS — cache stampede / collapse broken"
+            description: "The two-tier merchant cache (in-process singleflight 1s over Redis 10s, D11) should hold catalog origin load at <=1 QPS regardless of read volume. Origin QPS above 1 means the singleflight or a cache tier is failing (Redis down, TTL misconfig, hot-key skew past a single node). A 1M-RPS merchant page must cost catalog <=1 QPS. Runbook: docs/runbooks/feed-cache.md."
+        - alert: FeedCacheFeedColdStampede
+          expr: sum(rate(feedcache_feed_origin_fetches_total[1m])) by (region, tile) > 1
+          for: 1m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "geo-tile feed origin > 1 QPS on a single tile — SWR/singleflight collapse broken"
+            description: "A single geo-tile should trigger at most one in-flight origin fetch (cold miss) or one background revalidation (stale) at a time. More than 1 QPS per tile means the stampede protection (singleflight + stale-while-revalidate, D17) is not collapsing concurrent misses. Runbook: docs/runbooks/feed-cache.md."
+
+    - name: feed-cache.hitrate
+      rules:
+        - alert: FeedCacheHitRateLow
+          expr: |
+            sum(rate(feedcache_feed_hits_total[5m])) by (region)
+            / sum(rate(feedcache_feed_requests_total[5m])) by (region) < 0.85
+          for: 10m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "geo-tile feed cache hit rate < 85% at peak"
+            description: "The feed cache (fresh + stale-served) is below its 85% hit-rate SLO, so more browse traffic is reaching the ranking/search origin than budgeted. Check tile skew, TTLs (fresh/stale windows), and CDN offload. Runbook: docs/runbooks/feed-cache.md."
+
+    - name: feed-cache.revalidation
+      rules:
+        - alert: FeedCacheRevalidationErrors
+          expr: sum(rate(feedcache_feed_revalidation_errors_total[5m])) by (region) > 0
+          for: 15m
+          labels:
+            severity: warning
+            team: discovery
+          annotations:
+            summary: "geo-tile feed background revalidations are failing"
+            description: "Stale tiles are being served (availability preserved by SWR) but the background revalidation to the origin is erroring, so tiles drift toward the hard TTL. Not an immediate availability risk (stale-if-error covers it) but freshness degrades. Check the ranking origin. Runbook: docs/runbooks/feed-cache.md."

@@ -1,0 +1,206 @@
+# feed-cache.v1 — V-T6 Feed & merchant-page caches slice (decisions D11 + D17).
+# feed-cache fronts the discovery read path with two stampede-safe caches wired
+# into the customer-bff browse + merchant endpoints:
+#   - GET /v1/customer/home            geo-tile FEED cache (stale-while-revalidate,
+#                                      CDN-fronted); origin = the ranking browse
+#                                      feed (ranking -> search).
+#   - GET /v1/customer/merchants/{id}  merchant-page TWO-TIER cache (in-process
+#                                      singleflight 1s over Redis 10s, D11);
+#                                      origin = merchant-catalog.
+# Gated by the `feed_cache` flag (ON = cache, OFF = passthrough). An X-Flag-Override
+# request bypasses the shared cache. Conventions (02 §1): /v1 paths, snake_case
+# fields, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: feed-cache
+  version: "1.0.0"
+  description: Geo-tile feed cache + merchant-page two-tier cache (01 §5 Redis hot paths; V-T6 implements D11 + D17).
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/customer/home:
+    get:
+      operationId: browse_home_cached
+      summary: Customer browse feed served from the geo-tile cache (stale-while-revalidate).
+      description: >
+        The customer-bff browse endpoint (gateway passthrough). Serves the feed
+        for the caller's geo-tile from cache: a fresh tile is served directly, a
+        stale tile is served immediately while one background revalidation runs
+        (SWR), a cold tile blocks on a single (singleflight-coalesced) origin
+        fetch. The origin is the ranking browse feed (D17 two-phase: ranking
+        re-ranks the search top-500). Response carries an `X-Cache` header
+        (MISS | HIT | STALE | BYPASS).
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, example: 13.7563 } }
+        - { name: lng, in: query, required: true, schema: { type: number, example: 100.5018 } }
+      responses:
+        "200":
+          description: Browse feed (shape identical to the ranking browse feed; cache only changes latency/freshness).
+          headers:
+            X-Cache:
+              description: Cache outcome — MISS | HIT | STALE | BYPASS.
+              schema: { type: string, example: "HIT" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HomeFeed" }
+              example:
+                location: { lat: 13.7563, lng: 100.5018 }
+                feed:
+                  - { store_id: "mer_01H8XGABCDE", name: "Som Tam House", rating: 4.7, distance_m: 820, open: true, delivery_fee: { amount: 1500, currency: "THB" }, eta_minutes: 15 }
+                ranking: { scorer: "ml", ml_requested: true, fallback_engaged: false }
+                next_cursor: null
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/customer/merchants/{merchant_id}:
+    get:
+      operationId: merchant_page_cached
+      summary: Customer merchant page served from the two-tier cache (singleflight 1s over Redis 10s).
+      description: >
+        The merchant/store page (D11 celebrity-merchant defence): served from a
+        two-tier cache — an in-process singleflight-coalesced 1s tier over a
+        Redis 10s tier — so a 1M-RPS merchant page costs the catalog origin ≤1 QPS
+        and a cold-key stampede collapses to exactly one origin fetch. Response
+        carries `X-Cache` (MISS | HIT | BYPASS) and `X-Cache-Tier` (l1 | l2 |
+        origin | bypass).
+      parameters:
+        - { name: merchant_id, in: path, required: true, schema: { type: string, example: "mer_01H8XGABCDE" } }
+      responses:
+        "200":
+          description: Merchant page (proxied menu/store payload from merchant-catalog).
+          headers:
+            X-Cache:
+              description: Cache outcome — MISS | HIT | BYPASS.
+              schema: { type: string, example: "HIT" }
+            X-Cache-Tier:
+              description: Which tier served it — l1 | l2 | origin | bypass.
+              schema: { type: string, example: "l1" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MerchantPage" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/cache/stats:
+    get:
+      operationId: feed_cache_stats
+      summary: Cache telemetry — hit rates + origin-fetch counts for the feed and merchant caches.
+      responses:
+        "200":
+          description: Stats snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stats" }
+        default: { $ref: "#/components/responses/Error" }
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, description: "integer minor units (02 §1 Money)." }
+        currency: { type: string, example: "THB" }
+    Candidate:
+      type: object
+      required: [store_id, name, open]
+      properties:
+        store_id: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        distance_m: { type: integer }
+        open: { type: boolean }
+        delivery_fee: { $ref: "#/components/schemas/Money" }
+        eta_minutes: { type: integer }
+    HomeFeed:
+      type: object
+      required: [location, feed]
+      properties:
+        location:
+          type: object
+          required: [lat, lng]
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+        feed:
+          type: array
+          items: { $ref: "#/components/schemas/Candidate" }
+        ranking:
+          type: object
+          properties:
+            scorer: { type: string, example: "ml" }
+            ml_requested: { type: boolean }
+            fallback_engaged: { type: boolean }
+        next_cursor:
+          type: [string, "null"]
+          description: "Cursor pagination (02 §1) — null at end."
+    MerchantPage:
+      type: object
+      description: "The merchant/store page payload (proxied from merchant-catalog's menu read)."
+      properties:
+        merchant_id: { type: string }
+        version: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              item_id: { type: string }
+              name: { type: string }
+              price: { $ref: "#/components/schemas/Money" }
+              available: { type: boolean }
+    CacheStats:
+      type: object
+      properties:
+        requests: { type: integer }
+        origin_fetches: { type: integer }
+        hit_rate: { type: number }
+        coalesced: { type: integer }
+    Stats:
+      type: object
+      properties:
+        feed:
+          allOf:
+            - $ref: "#/components/schemas/CacheStats"
+            - type: object
+              properties:
+                fresh_hits: { type: integer }
+                stale_hits: { type: integer }
+                misses: { type: integer }
+                revalidations: { type: integer }
+                tiles: { type: integer }
+        merchant:
+          allOf:
+            - $ref: "#/components/schemas/CacheStats"
+            - type: object
+              properties:
+                l1_hits: { type: integer }
+                l2_hits: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "FEED_CACHE_ORIGIN_FAILED"
+              message: "Upstream origin fetch failed."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: true

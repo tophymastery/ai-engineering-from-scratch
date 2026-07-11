@@ -40,6 +40,13 @@ services:
   # BFF endpoint (/customer-bff/v1/customer/home) here. `make e2e-sync` promotes it
   # stub->real once the binary builds.
   - { name: ranking,           port: 8115, mode: stub, contract: contracts/openapi/ranking.v1.yaml,           real_cmd: "bash tools/ranking-realcmd.sh" }
+  # feed-cache is the V-T6 slice (D11/D17): real_cmd boots the built feed-cache
+  # binary (tools/feed-cache-realcmd.sh, feed_cache on). It FRONTS the browse feed
+  # (its ORIGIN_FEED_URL points at the ranking slot -> geo-tile SWR cache) and the
+  # customer merchant page (ORIGIN_MERCHANT_URL -> merchant-catalog, two-tier
+  # singleflight/Redis cache). The gateway routes /customer-bff/v1/customer/home +
+  # /v1/customer/merchants/* here. `make e2e-sync` promotes it stub->real.
+  - { name: feed-cache,        port: 8116, mode: stub, contract: contracts/openapi/feed-cache.v1.yaml,        real_cmd: "bash tools/feed-cache-realcmd.sh" }
   - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "" }
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }
