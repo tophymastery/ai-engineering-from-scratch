@@ -1,0 +1,69 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T6 feed & merchant-page caches slice (D11/D17). Panels bind to the metrics feed-cache exports (also driving deploy/alerts/feed-cache.yaml): geo-tile feed hit rate (>= 85% SLO), merchant-page origin QPS (<= 1 QPS stampede budget), the two-tier tier mix (L1/L2/origin), stale-while-revalidate rate, and per-tile origin fetches (cold-stampede detector). Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Feed & Merchant-Page Caches — Hit Rate, Stampede & Two-Tier (V-T6)",
+  "uid": "feed-cache-v-t6",
+  "tags": ["discovery", "feed-cache", "cache", "stampede", "swr", "D11", "D17", "V-T6"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(feedcache_feed_requests_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Geo-tile feed hit rate (SLO >= 85%) — fresh + stale-served",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.85 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(feedcache_feed_hits_total{region=~\"$region\"}[5m])) / sum(rate(feedcache_feed_requests_total{region=~\"$region\"}[5m]))", "legendFormat": "feed hit rate" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Merchant-page origin QPS (SLO <= 1 QPS) — two-tier + singleflight collapse",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(feedcache_merchant_origin_fetches_total{region=~\"$region\"}[1m]))", "legendFormat": "catalog origin qps" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Merchant two-tier mix — L1 / L2 / origin",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(feedcache_merchant_l1_hits_total{region=~\"$region\"}[5m]))", "legendFormat": "L1 (in-proc 1s)" },
+        { "expr": "sum(rate(feedcache_merchant_l2_hits_total{region=~\"$region\"}[5m]))", "legendFormat": "L2 (redis 10s)" },
+        { "expr": "sum(rate(feedcache_merchant_origin_fetches_total{region=~\"$region\"}[5m]))", "legendFormat": "origin (catalog)" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Feed stale-while-revalidate — fresh vs stale-served vs background revalidations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(feedcache_feed_fresh_hits_total{region=~\"$region\"}[5m]))", "legendFormat": "fresh" },
+        { "expr": "sum(rate(feedcache_feed_stale_hits_total{region=~\"$region\"}[5m]))", "legendFormat": "stale-served (SWR)" },
+        { "expr": "sum(rate(feedcache_feed_revalidations_total{region=~\"$region\"}[5m]))", "legendFormat": "background revalidations" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cold-stampede detector — feed origin fetches per tile (should be ~1/tile/TTL)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "topk(10, sum(rate(feedcache_feed_origin_fetches_total{region=~\"$region\"}[1m])) by (tile))", "legendFormat": "{{tile}}" }
+      ]
+    }
+  ]
+}

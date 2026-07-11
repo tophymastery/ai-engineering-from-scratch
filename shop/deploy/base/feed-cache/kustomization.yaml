@@ -1,0 +1,16 @@
+# Kustomize base for the V-T6 feed-cache slice. Its own base dir alongside the
+# sibling V-T3/V-T4/V-T5 Discovery bases (per deploy/base/kustomization.yaml:
+# "Real services add their own base dirs alongside these"). Ships the Deployment
+# (with the CDN-fronting annotations, D17) + Service. Rendered + YAML-validated by
+# `make render-feed-cache` (mirrors `make render-ranking`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml

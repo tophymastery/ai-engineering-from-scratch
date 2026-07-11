@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf render-feed-cache e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -38,6 +38,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/search-indexer && $(GO) build ./...
 	@cd services/search-query && $(GO) build ./...
 	@cd services/ranking && $(GO) build ./...
+	@cd services/feed-cache && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -121,6 +122,10 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@cd services/ranking && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@echo "== V-T5 perf criteria (no -race): re-rank top-500->top-50 p99<50ms =="
 	@$(MAKE) --no-print-directory test-ranking-perf
+	@echo "== V-T6 feed & merchant-page caches (D11/D17, -race): merchant two-tier singleflight (cold 10k-stampede => EXACTLY 1 origin fetch) + geo-tile feed SWR (hit>=85%, stale-serve+1 revalidation) + flag/bypass + handlers =="
+	@cd services/feed-cache && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T6 perf criteria (no -race): 1M-request collapse => origin==1 + sustained <=1 origin QPS =="
+	@$(MAKE) --no-print-directory test-feedcache-perf
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -213,6 +218,9 @@ test-search-perf: ## V-T4: search perf criteria (no -race): query p99<150ms + 30
 test-ranking-perf: ## V-T5: ranking perf criteria (no -race): re-rank top-500->top-50 p99<50ms
 	@cd services/ranking && $(GO) test -count=1 -run TestPerf ./rank/
 
+test-feedcache-perf: ## V-T6: feed-cache perf criteria (no -race): 1M-request collapse => origin==1 + sustained <=1 origin QPS
+	@cd services/feed-cache && $(GO) test -count=1 -run TestPerf ./cache/
+
 render-search: ## V-T4/D17: render the search base (search-query+search-indexer Deployments/Services + per-cell OpenSearch data/ingest StatefulSets) + lint the search alerts/dashboard
 	@set -e; root=$$PWD; f=$$root/.render-search.yaml; \
 	  $(KUSTOMIZE) build deploy/base/search > $$f; \
@@ -233,6 +241,17 @@ render-ranking: ## V-T5/D17: render the ranking base (Deployment+Service) + lint
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/ranking.yaml && $(GO) run . $$root/deploy/dashboards/ranking.json ); \
 	  echo "render-ranking: ranking base (Deployment+Service) + alerts + dashboard rendered/parsed"
+
+render-feed-cache: ## V-T6/D11+D17: render the feed-cache base (Deployment[+CDN-front annotations]+Service) + lint the feed-cache stampede/hit-rate alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-feed-cache.yaml; \
+	  $(KUSTOMIZE) build deploy/base/feed-cache > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: feed-cache' $$f || { echo "render-feed-cache: feed-cache Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-feed-cache: Service missing from render"; exit 1; }; \
+	  grep -q 'shop.io/cdn-front' $$f || { echo "render-feed-cache: CDN-fronting annotations missing from render (D17)"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/feed-cache.yaml && $(GO) run . $$root/deploy/dashboards/feed-cache.json ); \
+	  echo "render-feed-cache: feed-cache base (Deployment+Service+CDN-front) + stampede/hit-rate alerts + dashboard rendered/parsed"
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
 	@ci/backdoor-scan.sh

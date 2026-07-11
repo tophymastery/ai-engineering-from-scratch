@@ -12,6 +12,7 @@ services:
   merchant-catalog:  { team: "Discovery",        slice: "V-T3"  }
   search:            { team: "Discovery",        slice: "V-T4"  }
   ranking:           { team: "Discovery",        slice: "V-T5"  }
+  feed-cache:        { team: "Discovery",        slice: "V-T6"  }
   cart:              { team: "Marketplace",      slice: "V-T7"  }
   order:             { team: "Marketplace",      slice: "V-T9"  }
   payment:           { team: "Payments",         slice: "V-T10" }

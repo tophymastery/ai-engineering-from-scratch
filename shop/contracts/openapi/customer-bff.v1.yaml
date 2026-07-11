@@ -44,6 +44,42 @@ paths:
                 next_cursor: null
         default:
           $ref: "#/components/responses/Error"
+  /v1/customer/merchants/{merchant_id}:
+    get:
+      operationId: get_merchant_page
+      summary: Customer merchant/store page — served from the feed-cache two-tier cache (V-T6).
+      description: >
+        The customer merchant page (02 §4.2). V-T6/D11: the GATEWAY routes
+        /customer-bff/v1/customer/merchants/* to the feed-cache slot, which serves
+        the page from a two-tier cache (in-process singleflight 1s over Redis 10s)
+        with merchant-catalog as the origin — so a 1M-RPS merchant page costs the
+        catalog ≤1 QPS. Same discover-from-route-table lifecycle as the browse
+        passthrough; behind the `feed_cache` flag. See contracts/openapi/feed-cache.v1.yaml.
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema: { type: string, example: "mer_01H8XGABCDE" }
+      responses:
+        "200":
+          description: Merchant page (menu/store payload; X-Cache header carries the cache outcome).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  merchant_id: { type: string }
+                  version: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        item_id: { type: string }
+                        name: { type: string }
+                        available: { type: boolean }
+        default:
+          $ref: "#/components/responses/Error"
   /v1/customer/orders/{order_id}:
     get:
       operationId: get_order_detail

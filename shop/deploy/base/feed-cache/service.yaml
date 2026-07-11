@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: feed-cache
+  labels:
+    app: feed-cache
+    shop.io/team: discovery
+spec:
+  selector:
+    app: feed-cache
+  ports:
+    - name: http
+      port: 8116
+      targetPort: 8116

@@ -197,9 +197,22 @@ func main() {
 	// no ranking slot exists the feed falls back to the search browse feed unchanged.
 	searchBase := upstreamFor(routes, "/search/")
 	rankingBase := upstreamFor(routes, "/ranking/")
+	// --- V-T6 feed & merchant-page caches (D11/D17) ---
+	// feed-cache, when present, FRONTS the browse feed: it caches the geo-tile feed
+	// (stale-while-revalidate) with its origin the ranking browse feed, so the
+	// chain becomes customer-bff -> feed-cache -> ranking (re-rank) -> search
+	// (retrieval). It also serves the cached customer merchant page
+	// (/v1/customer/merchants/*, two-tier singleflight over Redis) with its origin
+	// merchant-catalog. Same discover-from-route-table lifecycle; the `feed_cache`
+	// flag (resolved INSIDE feed-cache, per-request) gates cache vs passthrough,
+	// and an X-Flag-Override request bypasses the shared cache.
+	feedCacheBase := upstreamFor(routes, "/feed-cache/")
 	browseHomeBase := rankingBase
 	if browseHomeBase == "" {
 		browseHomeBase = searchBase
+	}
+	if feedCacheBase != "" {
+		browseHomeBase = feedCacheBase // feed-cache fronts the browse feed
 	}
 	for _, bff := range bffsWithBrowsePassthrough {
 		bffPrefix := "/" + bff + "/"
@@ -220,11 +233,23 @@ func main() {
 			}
 			mux.Handle(bffPrefix+"v1/customer/home", http.StripPrefix("/"+bff, httputil.NewSingleHostReverseProxy(hURL)))
 		}
+		if feedCacheBase != "" {
+			fcURL, err := url.Parse(feedCacheBase)
+			if err != nil {
+				log.Fatalf("bad feed-cache upstream %q: %v", feedCacheBase, err)
+			}
+			// The customer merchant page is served from feed-cache's two-tier cache.
+			mux.Handle(bffPrefix+"v1/customer/merchants/", http.StripPrefix("/"+bff, httputil.NewSingleHostReverseProxy(fcURL)))
+		}
 		who := "search"
 		if rankingBase != "" {
 			who = "ranking (re-rank) -> search (retrieval)"
 		}
-		log.Printf("browse passthrough %sv1/customer/home -> %s [%s]; v1/search -> %s (search)", bffPrefix, browseHomeBase, who, searchBase)
+		if feedCacheBase != "" {
+			who = "feed-cache (geo-tile SWR) -> " + who
+		}
+		log.Printf("browse passthrough %sv1/customer/home -> %s [%s]; v1/customer/merchants/* -> %s; v1/search -> %s (search)",
+			bffPrefix, browseHomeBase, who, feedCacheBase, searchBase)
 	}
 
 	flagSet := flags.FromEnv()

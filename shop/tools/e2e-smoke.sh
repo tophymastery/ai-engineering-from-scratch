@@ -351,6 +351,86 @@ else
   assert_body "ranking reports the model healthy (no auto-fallback)" GET "/ranking/v1/rank/stats" '"fallback_engaged":false'
 fi
 
+# --- 16. V-T6 feed & merchant-page caches (D11/D17) — the browse feed now flows
+# customer-bff -> feed-cache (geo-tile stale-while-revalidate) -> ranking (re-rank)
+# -> search (retrieval); the customer merchant page flows customer-bff -> feed-cache
+# (two-tier singleflight 1s over Redis 10s) -> merchant-catalog. Both behind the
+# `feed_cache` flag (forced ON in the e2e binary; the e2e binary uses short TTLs so
+# the SWR transition is observable in seconds). Proves via the X-Cache header:
+#   - FEED: MISS -> HIT (repeat) -> STALE (past fresh TTL, served stale + kicks a
+#     background revalidation) -> HIT (revalidated) — the full SWR cycle.
+#   - MERCHANT PAGE: MISS(origin) -> HIT(l1); repeated reads collapse to ONE
+#     catalog origin fetch (two-tier + singleflight), asserted via /v1/cache/stats.
+# GATED on feed-cache + ranking + search real (feed) and feed-cache +
+# merchant-catalog real (merchant page). ---
+echo "== V-T6 feed & merchant-page caches (browse SWR MISS->HIT->STALE->HIT + merchant two-tier collapse, via customer-bff) =="
+FEEDCACHE_MODE="$(awk -F'\t' '$1=="feed-cache"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+RANKING_MODE_F="$(awk -F'\t' '$1=="ranking"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+SEARCH_MODE_F="$(awk -F'\t' '$1=="search"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+CATALOG_MODE_F="$(awk -F'\t' '$1=="merchant-catalog"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+
+# xcache <path> [override] — GET a path through the gateway and echo its X-Cache header.
+xcache() {
+  local path="$1" ov="${2:-}"; local args=(-s -D - -o /dev/null --max-time 8 "$GW$path")
+  [ -n "$ov" ] && args+=(-H "X-Flag-Override: $ov")
+  curl "${args[@]}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="x-cache"{print $2}'
+}
+
+if [ "$FEEDCACHE_MODE" != "real" ] || [ "$RANKING_MODE_F" != "real" ] || [ "$SEARCH_MODE_F" != "real" ]; then
+  echo "  SKIP (feed): feed-cache='$FEEDCACHE_MODE' ranking='$RANKING_MODE_F' search='$SEARCH_MODE_F' — feed cache runs only when feed-cache+ranking+search are all real"
+else
+  # A dedicated browse point (distinct tile) so the SWR cycle is deterministic.
+  FLAT=13.5000; FLNG=100.4000
+  FSTORE="mer_e2e_feedcache_$$"
+  curl -s -o /dev/null -X POST "$GW/search/v1/index/merchants" -H 'Content-Type: application/json' \
+    -d '{"merchant_id":"'"$FSTORE"'","name":"E2E FeedCache","lat":'"$FLAT"',"lng":'"$FLNG"',"open":true,"rating":4.6,"menu_version":1,"items":[{"item_id":"i","name":"Som Tam","amount":8000,"currency":"THB","available":true}]}'
+  sleep 0.2
+
+  # 1. cold tile -> MISS (feed-cache fetches the ranking->search origin).
+  c1="$(xcache "/customer-bff/v1/customer/home?lat=$FLAT&lng=$FLNG")"
+  if [ "$c1" = MISS ]; then pass "browse cold tile is a cache MISS (X-Cache: MISS)"; else bad "browse first X-Cache=$c1, want MISS"; fi
+  # 2. immediate repeat -> HIT (within the 1s fresh window).
+  c2="$(xcache "/customer-bff/v1/customer/home?lat=$FLAT&lng=$FLNG")"
+  if [ "$c2" = HIT ]; then pass "browse repeat is a cache HIT (X-Cache: HIT)"; else bad "browse repeat X-Cache=$c2, want HIT"; fi
+  # 3. past the fresh TTL (1s) but within the stale band (10s) -> STALE + revalidate.
+  sleep 1.2
+  c3="$(xcache "/customer-bff/v1/customer/home?lat=$FLAT&lng=$FLNG")"
+  if [ "$c3" = STALE ]; then pass "browse past fresh-TTL is served STALE + kicks background revalidation (SWR)"; else bad "browse stale X-Cache=$c3, want STALE"; fi
+  # 4. after the background revalidation completes -> HIT again (refreshed).
+  sleep 0.4
+  c4="$(xcache "/customer-bff/v1/customer/home?lat=$FLAT&lng=$FLNG")"
+  if [ "$c4" = HIT ]; then pass "browse after revalidation is HIT again (tile refreshed)"; else bad "browse post-reval X-Cache=$c4, want HIT"; fi
+  # The served feed still lists the seeded store (cache preserves content).
+  assert_body "cached browse feed still lists the store" GET "/customer-bff/v1/customer/home?lat=$FLAT&lng=$FLNG" "\"store_id\":\"$FSTORE\""
+  # An X-Flag-Override request BYPASSES the shared cache (deterministic-test path).
+  cb="$(xcache "/customer-bff/v1/customer/home?lat=$FLAT&lng=$FLNG" "feed_cache=true")"
+  if [ "$cb" = BYPASS ]; then pass "X-Flag-Override request bypasses the shared cache (X-Cache: BYPASS)"; else bad "override browse X-Cache=$cb, want BYPASS"; fi
+  # Feed cache is serving hits (hit rate > 0 after the cycle above).
+  assert_body "feed-cache reports feed hits accrued" GET "/feed-cache/v1/cache/stats" '"fresh_hits"'
+fi
+
+if [ "$FEEDCACHE_MODE" != "real" ] || [ "$CATALOG_MODE_F" != "real" ]; then
+  echo "  SKIP (merchant page): feed-cache='$FEEDCACHE_MODE' merchant-catalog='$CATALOG_MODE_F' — merchant-page cache runs only when both are real"
+else
+  # Create a merchant in the catalog (bootstraps an empty menu) via merchant-bff,
+  # then read its customer PAGE through feed-cache's two-tier cache.
+  FCMID="mer_e2e_fcpage_$$"
+  curl -s -o /dev/null -X POST "$GW/merchant-bff/v1/merchants" -H 'Content-Type: application/json' \
+    -d '{"merchant_id":"'"$FCMID"'","name":"E2E FC Page"}'
+  sleep 0.2
+  # 1. cold merchant page -> MISS from the origin (merchant-catalog).
+  m1="$(xcache "/customer-bff/v1/customer/merchants/$FCMID")"
+  if [ "$m1" = MISS ]; then pass "merchant page cold read is a cache MISS (origin=catalog)"; else bad "merchant page first X-Cache=$m1, want MISS"; fi
+  # 2. many repeat reads collapse onto the two tiers (no new origin fetch).
+  for _ in $(seq 1 20); do curl -s -o /dev/null "$GW/customer-bff/v1/customer/merchants/$FCMID" 2>/dev/null; done
+  m2="$(xcache "/customer-bff/v1/customer/merchants/$FCMID")"
+  if [ "$m2" = HIT ]; then pass "merchant page repeat reads are cache HITs (two-tier)"; else bad "merchant page repeat X-Cache=$m2, want HIT"; fi
+  # 3. HEADLINE: all those reads cost the catalog EXACTLY ONE origin fetch.
+  STATS="$(curl -s --max-time 8 "$GW/feed-cache/v1/cache/stats" 2>/dev/null)"
+  MOF="$(printf '%s' "$STATS" | sed -n 's/.*"merchant":{[^}]*"origin_fetches":\([0-9]*\).*/\1/p')"
+  if [ "$MOF" = 1 ]; then pass "merchant page: >20 reads collapsed to EXACTLY 1 catalog origin fetch (two-tier + singleflight)"; else bad "merchant origin_fetches=$MOF, want 1 (${STATS:0:200})"; fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"
