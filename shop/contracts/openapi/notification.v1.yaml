@@ -1,0 +1,87 @@
+# notification.v1 — minimal S-T8 topology contract (01 §1 `notification`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T15 merges.
+# The real service is event-driven and delivers into the notify-sink fake; this
+# minimal sync surface lets the topology boot + healthcheck. Grows additively per
+# D30. Conventions (02 §1): /v1 paths, snake_case, error envelope on non-2xx.
+openapi: 3.0.3
+info:
+  title: notification
+  version: "1.0.0"
+  description: Push/SMS/email fan-out (01 §1). Minimal E2E stub — enqueue a notification.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/notifications:
+    post:
+      operationId: enqueue_notification
+      summary: Enqueue a notification (real fan-out is event-driven into notify-sink).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipient, template]
+              properties:
+                recipient: { type: string, example: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+                template: { type: string, example: "order_delivered" }
+                channel: { type: string, enum: [PUSH, SMS, EMAIL], example: "PUSH" }
+      responses:
+        "202":
+          description: Notification accepted for delivery.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Enqueued" }
+              example:
+                notification_id: "ntf_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "QUEUED"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    Enqueued:
+      type: object
+      required: [notification_id, status]
+      properties:
+        notification_id: { type: string }
+        status: { type: string, enum: [QUEUED, DROPPED_STALE] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "VALIDATION"
+              message: "recipient and template are required."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

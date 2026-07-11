@@ -1,0 +1,83 @@
+# admin-bff.v1 — client-shaped BFF contract (01 §2, 02 §4.2). Minimal S-T8
+# topology surface (+ runtime /healthz) so the E2E env boots a stub until the ops
+# slices merge. One resource — cross-service order lookup for the ops console.
+# Conventions (02 §1): /v1 paths, snake_case, the 02 §2 error envelope on non-2xx.
+openapi: 3.0.3
+info:
+  title: admin-bff
+  version: "1.0.0"
+  description: Admin BFF — ops console cross-service lookups (01 §2). Minimal E2E stub — order lookup.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/admin/orders/{order_id}:
+    get:
+      operationId: admin_get_order
+      summary: Cross-service order view for the ops console (order + payment + dispatch).
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+      responses:
+        "200":
+          description: Ops-shaped order view.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminOrder" }
+              example:
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "DELIVERED"
+                payment_status: "CAPTURED"
+                assignment_status: "DELIVERED"
+                total: { amount: 42550, currency: "THB" }
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    AdminOrder:
+      type: object
+      required: [order_id, status]
+      properties:
+        order_id: { type: string }
+        status: { type: string }
+        payment_status: { type: string }
+        assignment_status: { type: string }
+        total: { $ref: "#/components/schemas/Money" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "ORDER_NOT_FOUND"
+              message: "No order ord_01H8…."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

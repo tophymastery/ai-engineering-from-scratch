@@ -1,0 +1,46 @@
+# deploy/e2e/topology.yaml — the SINGLE SOURCE manifest for the shared E2E env
+# (S-T8). Every service in the 01 §1 catalog + all 4 BFFs + the 3 S-T7 fakes,
+# each as one slot with a stable port. tools/e2e-up.sh boots exactly this set (in
+# process mode); the gateway fans out one prefix per slot.
+#
+# mode per slot (today):
+#   stub  — booted by tools/stubgen from `contract` (the neighbour isn't built yet)
+#   fake  — a built S-T7 fake binary (.run/<name>); used where a catalog service
+#           delegates to a provider sim (payment PSP side, maps, notify sink)
+#   real  — booted from `real_cmd` (the merged slice binary). No slice binaries
+#           exist in this repo yet, so every catalog slot ships mode: stub with an
+#           empty real_cmd. The stub->real swap is driven at RUNTIME from a small
+#           overlay (.run/e2e-overlay.yaml) written by tools/e2e-swap.sh /
+#           `make e2e-sync` — never by editing this manifest. e2e-up re-reads
+#           manifest+overlay on every invocation (the "automatic from manifests"
+#           hook; in production a GitOps watcher does this on merge).
+#
+# real_cmd contract: a shell command launched with PORT, CONTRACT and SERVICE_NAME
+# in the environment, so a plain binary path (reads PORT) or a wrapper both work.
+version: 1
+gateway:
+  name: gateway
+  port: 8080
+services:
+  # --- 12-service catalog (01 §1) ---
+  - { name: identity,          port: 8101, mode: stub, contract: contracts/openapi/identity.v1.yaml,          real_cmd: "" }
+  - { name: merchant-catalog,  port: 8102, mode: stub, contract: contracts/openapi/merchant-catalog.v1.yaml,  real_cmd: "" }
+  - { name: search,            port: 8103, mode: stub, contract: contracts/openapi/search.v1.yaml,            real_cmd: "" }
+  - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "" }
+  - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
+  - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }
+  - { name: pricing-promo,     port: 8107, mode: stub, contract: contracts/openapi/pricing-promo.v1.yaml,     real_cmd: "" }
+  - { name: dispatch,          port: 8108, mode: stub, contract: contracts/openapi/dispatch.v1.yaml,          real_cmd: "" }
+  - { name: location-tracking, port: 8109, mode: stub, contract: contracts/openapi/location-tracking.v1.yaml, real_cmd: "" }
+  - { name: notification,      port: 8110, mode: stub, contract: contracts/openapi/notification.v1.yaml,      real_cmd: "" }
+  - { name: rating,            port: 8111, mode: stub, contract: contracts/openapi/rating.v1.yaml,            real_cmd: "" }
+  - { name: settlement,        port: 8112, mode: stub, contract: contracts/openapi/settlement.v1.yaml,        real_cmd: "" }
+  # --- 4 BFFs (01 §2) ---
+  - { name: customer-bff,      port: 8121, mode: stub, contract: contracts/openapi/customer-bff.v1.yaml,      real_cmd: "" }
+  - { name: merchant-bff,      port: 8122, mode: stub, contract: contracts/openapi/merchant-bff.v1.yaml,      real_cmd: "" }
+  - { name: driver-bff,        port: 8123, mode: stub, contract: contracts/openapi/driver-bff.v1.yaml,        real_cmd: "" }
+  - { name: admin-bff,         port: 8124, mode: stub, contract: contracts/openapi/admin-bff.v1.yaml,         real_cmd: "" }
+  # --- 3 S-T7 fakes (03 §5): where a catalog service delegates to a provider sim ---
+  - { name: payment-sim,       port: 8091, mode: fake, contract: contracts/openapi/payment-sim.v1.yaml,       real_cmd: "" }
+  - { name: map-sim,           port: 8092, mode: fake, contract: contracts/openapi/map-sim.v1.yaml,           real_cmd: "" }
+  - { name: notify-sink,       port: 8093, mode: fake, contract: contracts/openapi/notify-sink.v1.yaml,       real_cmd: "" }

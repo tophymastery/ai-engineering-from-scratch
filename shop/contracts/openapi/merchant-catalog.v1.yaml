@@ -1,0 +1,90 @@
+# merchant-catalog.v1 — minimal S-T8 topology contract (01 §1 `merchant-catalog`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T3 merges.
+# Grows additively per D30. Conventions (02 §1): /v1 paths, snake_case fields,
+# the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: merchant-catalog
+  version: "1.0.0"
+  description: Merchants, stores, menus (01 §1). Minimal E2E stub surface — read menu.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/merchants/{merchant_id}/menu:
+    get:
+      operationId: get_menu
+      summary: Read a merchant's published menu (menu editor lands in V-T3).
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema: { type: string, example: "mer_01H8XGABCDE" }
+      responses:
+        "200":
+          description: Menu.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Menu" }
+              example:
+                merchant_id: "mer_01H8XGABCDE"
+                store_status: "OPEN"
+                items:
+                  - { item_id: "itm_01H8XG1", name: "Som Tam", price: { amount: 8000, currency: "THB" }, available: true }
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    Item:
+      type: object
+      required: [item_id, name, price]
+      properties:
+        item_id: { type: string }
+        name: { type: string }
+        price: { $ref: "#/components/schemas/Money" }
+        available: { type: boolean }
+    Menu:
+      type: object
+      required: [merchant_id, items]
+      properties:
+        merchant_id: { type: string }
+        store_status: { type: string, enum: [OPEN, BUSY, CLOSED] }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Item" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "MERCHANT_NOT_FOUND"
+              message: "No merchant mer_01H8…."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

@@ -1,0 +1,106 @@
+# cart.v1 — minimal S-T8 topology contract (01 §1 `cart`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T7 merges.
+# Grows additively per D30. Conventions (02 §1): /v1 paths, snake_case fields,
+# the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: cart
+  version: "1.0.0"
+  description: Per-user carts (01 §1). Minimal E2E stub surface — add item.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/carts/{cart_id}/items:
+    post:
+      operationId: add_cart_item
+      summary: Add an item to a cart (revalidated against catalog in V-T7).
+      parameters:
+        - name: cart_id
+          in: path
+          required: true
+          schema: { type: string, example: "crt_01H8XGJ2Q" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item_id, quantity]
+              properties:
+                item_id: { type: string, example: "itm_01H8XG1" }
+                quantity: { type: integer, example: 2 }
+      responses:
+        "200":
+          description: Updated cart.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+              example:
+                cart_id: "crt_01H8XGJ2Q"
+                items:
+                  - { item_id: "itm_01H8XG1", quantity: 2 }
+                subtotal: { amount: 16000, currency: "THB" }
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    CartItem:
+      type: object
+      required: [item_id, quantity]
+      properties:
+        item_id: { type: string }
+        quantity: { type: integer }
+    Cart:
+      type: object
+      required: [cart_id, items]
+      properties:
+        cart_id: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CartItem" }
+        subtotal: { $ref: "#/components/schemas/Money" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "ITEM_UNAVAILABLE"
+              message: "itm_01H8… is no longer available."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

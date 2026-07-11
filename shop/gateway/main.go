@@ -16,6 +16,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -51,8 +52,21 @@ func main() {
 		return
 	}
 
+	// Route table. By default (S-T1) the edge fronts only the placeholder. In the
+	// shared E2E env (S-T8) tools/e2e-up.sh writes a GATEWAY_ROUTES file mapping a
+	// prefix to every service+BFF+fake slot, so the same gateway binary fans out
+	// to the whole topology with zero code change — and keeps routing across a
+	// stub->real swap because the upstream port is stable per slot.
 	routes := []route{
 		{Prefix: "/placeholder/", Upstream: placeholderURL},
+	}
+	if rf := os.Getenv("GATEWAY_ROUTES"); rf != "" {
+		loaded, err := loadRoutes(rf)
+		if err != nil {
+			log.Fatalf("gateway: GATEWAY_ROUTES=%q: %v", rf, err)
+		}
+		routes = loaded
+		log.Printf("gateway: loaded %d route(s) from %s", len(routes), rf)
 	}
 
 	mux := http.NewServeMux()
@@ -131,6 +145,28 @@ func alert(mode string, r *http.Request, header, value string) {
 	b, _ := json.Marshal(line)
 	// stdout only (04 §3): the log pipeline ships it; the alert fires off this line.
 	log.Println(string(b))
+}
+
+// loadRoutes reads a JSON array of {"prefix","upstream"} objects (written by
+// tools/e2e-up.sh from deploy/e2e/topology.yaml + the runtime overlay).
+func loadRoutes(path string) ([]route, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var routes []route
+	if err := json.Unmarshal(b, &routes); err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("no routes in file")
+	}
+	for _, rt := range routes {
+		if rt.Prefix == "" || rt.Upstream == "" {
+			return nil, fmt.Errorf("route with empty prefix/upstream: %+v", rt)
+		}
+	}
+	return routes, nil
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

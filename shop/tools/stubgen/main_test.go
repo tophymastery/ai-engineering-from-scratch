@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestIsMutation(t *testing.T) {
+	for _, m := range []string{"POST", "PATCH", "PUT", "DELETE"} {
+		if !isMutation(m) {
+			t.Errorf("isMutation(%q) = false, want true", m)
+		}
+	}
+	for _, m := range []string{"GET", "HEAD", "OPTIONS"} {
+		if isMutation(m) {
+			t.Errorf("isMutation(%q) = true, want false", m)
+		}
+	}
+}
+
 func TestPathToRegexParamsAndActionVerb(t *testing.T) {
 	cases := []struct {
 		pattern string

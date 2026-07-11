@@ -1,0 +1,90 @@
+# rating.v1 — minimal S-T8 topology contract (01 §1 `rating`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T17 merges.
+# Grows additively per D30. Conventions (02 §1): /v1 paths, snake_case, error
+# envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: rating
+  version: "1.0.0"
+  description: Ratings & reviews (01 §1). Minimal E2E stub — rate a delivered order.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/ratings:
+    post:
+      operationId: rate_order
+      summary: Rate an order (unlocked by order.delivered; before delivery => 409 in V-T17).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_id, stars]
+              properties:
+                order_id: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+                stars: { type: integer, example: 5 }
+                comment: { type: string, example: "Fast and hot." }
+      responses:
+        "201":
+          description: Rating accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rating" }
+              example:
+                rating_id: "rat_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                stars: 5
+                status: "ACCEPTED"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    Rating:
+      type: object
+      required: [rating_id, order_id, stars, status]
+      properties:
+        rating_id: { type: string }
+        order_id: { type: string }
+        stars: { type: integer }
+        status: { type: string, enum: [ACCEPTED] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx (rating before delivery => 409)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "RATING_LOCKED"
+              message: "Order ord_01H8… is not delivered yet."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

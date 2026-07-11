@@ -1,0 +1,116 @@
+# pricing-promo.v1 — minimal S-T8 topology contract (01 §1 `pricing-promo`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T8 merges.
+# `pricing-promo` owns quotes (saga step 1); the smoke's checkout→delivery walk
+# starts here. Grows additively per D30. Conventions (02 §1): /v1 paths,
+# snake_case, integer minor-unit Money, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: pricing-promo
+  version: "1.0.0"
+  description: Quote engine — items, fees, surge, promos, vouchers (01 §1). Minimal E2E stub — quote.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/quotes:
+    post:
+      operationId: create_quote
+      summary: Price a cart — returns a quote (10-min TTL). Saga step 1.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cart_id]
+              properties:
+                cart_id: { type: string, example: "crt_01H8XGJ2Q" }
+                voucher_code: { type: string, example: "LUNCH25" }
+                delivery_location:
+                  type: object
+                  properties:
+                    lat: { type: number, example: 13.7563 }
+                    lng: { type: number, example: 100.5018 }
+      responses:
+        "201":
+          description: Quote created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quote" }
+              example:
+                quote_id: "qot_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                total: { amount: 42550, currency: "THB" }
+                fees:
+                  - { type: "DELIVERY", amount: 1900, currency: "THB" }
+                discounts:
+                  - { type: "VOUCHER", amount: -2500, currency: "THB" }
+                expires_at: "2026-07-11T02:25:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    LineItem:
+      type: object
+      required: [type, amount, currency]
+      properties:
+        type: { type: string }
+        amount: { type: integer }
+        currency: { type: string }
+    Quote:
+      type: object
+      required: [quote_id, total, expires_at]
+      properties:
+        quote_id: { type: string }
+        total: { $ref: "#/components/schemas/Money" }
+        fees:
+          type: array
+          items: { $ref: "#/components/schemas/LineItem" }
+        discounts:
+          type: array
+          items: { $ref: "#/components/schemas/LineItem" }
+        expires_at: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx (tampered/expired quote => 422)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "QUOTE_EXPIRED"
+              message: "Quote qot_01H8… has expired."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false
