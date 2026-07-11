@@ -65,8 +65,14 @@ else
 fi
 
 # --- 1. quote (pricing-promo) ---
+# The saga-step-1 quote carries an EXPLICIT subtotal so it is cart-independent
+# and passes whether the pricing-promo slot is a stub OR the real V-T8 service
+# (the real service, given a cart_id with no subtotal, would fetch the cart slot;
+# the deep V-T8 section below exercises that real cart-consumption path). The
+# richer real-only assertions (typed fees[]/discounts[], tampered ⇒ 422) live in
+# the PRICING_MODE-gated section further down.
 echo "== order lifecycle (01 §4) =="
-QUOTE='{"cart_id":"crt_e2e","voucher_code":"LUNCH25","delivery_location":{"lat":13.7563,"lng":100.5018}}'
+QUOTE='{"cart_id":"crt_e2e","subtotal":{"amount":40000,"currency":"THB"},"voucher_code":"LUNCH25","delivery_location":{"lat":13.7563,"lng":100.5018}}'
 assert_status "quote created"            POST /pricing-promo/v1/quotes 201 "$QUOTE"
 assert_body   "quote has quote_id"       POST /pricing-promo/v1/quotes 'quote_id' "$QUOTE"
 
@@ -514,6 +520,59 @@ else
     sleep 0.05
   done
   if [ "$uflag" = 1 ]; then pass "item-unavailable menu change flags the cart line + drops it from subtotal"; else bad "cart did not flag the item unavailable within 5s"; fi
+fi
+
+# --- 18. V-T8 pricing-promo (D10: typed fees[]/discounts[] + HMAC-signed quote,
+# tampered-quote => 422) — GATED on the pricing-promo, cart AND merchant-catalog
+# slots being REAL (a real quote WITHOUT an explicit subtotal CONSUMES the real
+# cart's subtotal, the pricing-promo->cart pact; the stub can't price a real
+# cart). Demoed THROUGH the customer-bff passthrough (gateway routes
+# /customer-bff/v1/quotes* -> pricing-promo). Proves: a quote priced from the
+# real cart carries typed DELIVERY/SERVICE fees + a VOUCHER discount + a signed
+# quote_id; a clean checkout persists (200); a TAMPERED quote is rejected 422. ---
+echo "== V-T8 pricing (quote from real cart -> typed fees[]/discounts[] -> checkout 200 -> tampered quote 422, via customer-bff) =="
+PRICING_MODE="$(awk -F'\t' '$1=="pricing-promo"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+CART_MODE_P="$(awk -F'\t' '$1=="cart"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+CATALOG_MODE_P="$(awk -F'\t' '$1=="merchant-catalog"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$PRICING_MODE" != "real" ] || [ "$CART_MODE_P" != "real" ] || [ "$CATALOG_MODE_P" != "real" ]; then
+  echo "  SKIP: pricing='$PRICING_MODE' cart='$CART_MODE_P' merchant-catalog='$CATALOG_MODE_P' — V-T8 deep section runs only when pricing-promo, cart AND merchant-catalog are all real"
+else
+  # Seed a merchant + one priced item (8000), then a cart with 2× it (subtotal 16000).
+  PVMID="mer_e2e_pricing_$$"
+  curl -s -o /dev/null -X POST "$GW/merchant-bff/v1/merchants" -H 'Content-Type: application/json' \
+    -d '{"merchant_id":"'"$PVMID"'","name":"E2E Pricing Kitchen"}'
+  PMENU_ETAG="$(curl -s -D - -o /dev/null --max-time 8 "$GW/merchant-bff/v1/merchants/$PVMID/menu" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+  PADD="$(curl -s --max-time 8 -X PATCH "$GW/merchant-bff/v1/merchants/$PVMID/menu" -H 'Content-Type: application/json' -H "If-Match: $PMENU_ETAG" \
+    -d '{"upsert_items":[{"name":"Som Tam","price":{"amount":8000,"currency":"THB"},"available":true}]}' 2>/dev/null)"
+  PVIID="$(printf '%s' "$PADD" | sed -n 's/.*"item_id":"\([^"]*\)".*/\1/p')"
+  PVCART="crt_e2e_pricing_$$"
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/customer-bff/v1/carts/$PVCART/items" -H 'Content-Type: application/json' \
+    -d '{"item_id":"'"$PVIID"'","merchant_id":"'"$PVMID"'","quantity":2}'
+  if [ -n "$PVIID" ]; then pass "seeded catalog item + cart for pricing ($PVCART subtotal 16000)"; else bad "failed to seed pricing cart (${PADD:0:160})"; fi
+
+  # Quote the cart THROUGH the BFF, no explicit subtotal → pricing CONSUMES the
+  # real cart's subtotal (the pricing-promo->cart pact) and prices it.
+  PQBODY='{"cart_id":"'"$PVCART"'","voucher_code":"LUNCH25","delivery_location":{"lat":13.7563,"lng":100.5018}}'
+  PQ="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/quotes" -H 'Content-Type: application/json' -d "$PQBODY" 2>/dev/null)"
+  PQID="$(printf '%s' "$PQ" | sed -n 's/.*"quote_id":"\([^"]*\)".*/\1/p')"
+  if [ -n "$PQID" ]; then pass "quote priced from the REAL cart via customer-bff (quote_id=$PQID)"; else bad "quote not created (${PQ:0:200})"; fi
+  # subtotal 16000 read from cart; SERVICE 10% = 1600; DELIVERY 1900; VOUCHER -2500.
+  if [[ "$PQ" == *'"subtotal":{"amount":16000'* ]]; then pass "quote subtotal 16000 read from the real cart contract"; else bad "quote subtotal not from cart (${PQ:0:200})"; fi
+  if [[ "$PQ" == *'"type":"DELIVERY"'* ]] && [[ "$PQ" == *'"type":"SERVICE"'* ]]; then pass "quote carries typed fees[] (DELIVERY + SERVICE, 02 §5)"; else bad "quote missing typed fees (${PQ:0:250})"; fi
+  if [[ "$PQ" == *'"type":"VOUCHER"'* ]] && [[ "$PQ" == *'"amount":-2500'* ]]; then pass "quote carries typed discounts[] (VOUCHER -2500)"; else bad "quote missing VOUCHER discount (${PQ:0:250})"; fi
+  if [[ "$PQ" == *'"total":{"amount":17000'* ]]; then pass "quote total 17000 (16000 + 1900 + 1600 - 2500)"; else bad "quote total wrong (${PQ:0:250})"; fi
+  if [[ "$PQ" == *'"signature":"'* ]] && [[ "$PQ" == *'"kid":"hk_'* ]]; then pass "quote is HMAC-signed (kid + signature present)"; else bad "quote not signed (${PQ:0:250})"; fi
+
+  # Clean checkout THROUGH the BFF → 200 (verify + persist).
+  COK="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/customer-bff/v1/quotes/$PQID:checkout" -H 'Content-Type: application/json' -d "$PQ" 2>/dev/null)"
+  if [ "$COK" = 200 ]; then pass "clean quote checks out (200, verified + persisted)"; else bad "clean checkout -> $COK (want 200)"; fi
+
+  # HEADLINE: a TAMPERED quote (total mutated) is rejected 422 at checkout.
+  PTAMP="$(printf '%s' "$PQ" | sed 's/"total":{"amount":[0-9]*/"total":{"amount":1/')"
+  TC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/customer-bff/v1/quotes/$PQID:checkout" -H 'Content-Type: application/json' -d "$PTAMP" 2>/dev/null)"
+  if [ "$TC" = 422 ]; then pass "TAMPERED quote rejected with 422 at checkout (HMAC integrity, D10)"; else bad "tampered checkout -> $TC (want 422)"; fi
+  TB="$(curl -s --max-time 8 -X POST "$GW/customer-bff/v1/quotes/$PQID:checkout" -H 'Content-Type: application/json' -d "$PTAMP" 2>/dev/null)"
+  if [[ "$TB" == *'QUOTE_INVALID'* ]]; then pass "422 envelope carries QUOTE_INVALID code (02 §2)"; else bad "422 body missing QUOTE_INVALID (${TB:0:160})"; fi
 fi
 
 echo "----"

@@ -1,0 +1,62 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pricing-promo
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: growth
+    slice: V-T8
+    decisions: D10
+spec:
+  groups:
+    # SLOs (V-T8 / D10):
+    #   - quote latency p99 < 300 ms
+    #   - tampered/expired quote → 422 is the intended REJECTION path, not a server
+    #     error; alert only if the 422 RATE spikes (a signing-key mismatch after a
+    #     bad rotation, or an attack) — a correctness signal, not data loss
+    #   - PG writes occur ONLY at checkout: alert if the quotes-table write rate
+    #     approaches the quote rate (a regression that would 50× pricing's PG load)
+    - name: pricing.latency
+      rules:
+        - alert: PricingQuoteLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(pricing_request_duration_seconds_bucket{route=~"/v1/quotes.*"}[5m])) by (le, route)) > 0.3
+          for: 10m
+          labels:
+            severity: warning
+            team: growth
+          annotations:
+            summary: "pricing quote p99 > 300ms ({{ $labels.route }})"
+            description: "Quote latency budget (300ms) is burning. Check the cart-read dependency (CART_URL) latency + the sign path. Runbook: docs/runbooks/pricing.md."
+
+    - name: pricing.integrity
+      rules:
+        - alert: PricingQuoteRejectRateHigh
+          expr: sum(rate(pricing_requests_total{code="422"}[5m])) / clamp_min(sum(rate(pricing_requests_total{route=~".*checkout.*"}[5m])), 1) > 0.2
+          for: 10m
+          labels:
+            severity: critical
+            team: growth
+          annotations:
+            summary: "pricing checkout 422 (tampered/expired quote) ratio > 20%"
+            description: "A high fraction of checkouts are rejected 422 (QUOTE_INVALID/QUOTE_EXPIRED). Expected occasionally (stale quote past 10-min TTL); a sustained spike after a key rotation means the outgoing key was retired too early (in-flight quotes lost their verifier) — see the rollback in docs/runbooks/quote-key-rotation.md. Not a charge; the write is correctly refused before PG."
+        - alert: PricingSigningKeyStale
+          expr: (time() - pricing_primary_key_created_timestamp_seconds) > 2592000
+          for: 1h
+          labels:
+            severity: warning
+            team: growth
+          annotations:
+            summary: "pricing HMAC signing key age > 30 days"
+            description: "The primary quote-signing key has not been rotated in > 30 days. Run the rotation procedure in docs/runbooks/quote-key-rotation.md (publish new key → 10-min overlap → retire old)."
+
+    - name: pricing.persistence
+      rules:
+        - alert: PricingPGWriteRateAnomalous
+          expr: sum(rate(pricing_quote_pg_writes_total[5m])) / clamp_min(sum(rate(pricing_requests_total{route="/v1/quotes",code="201"}[5m])), 1) > 0.5
+          for: 15m
+          labels:
+            severity: warning
+            team: growth
+          annotations:
+            summary: "pricing PG write rate approaching quote rate (D10 invariant at risk)"
+            description: "The `quotes` table should be written ONLY at checkout (~1/50th of quote volume, D10). A PG-write:quote ratio > 0.5 means the quote path may be persisting — a regression that 50×'s pricing's write load. Runbook: docs/runbooks/pricing.md."

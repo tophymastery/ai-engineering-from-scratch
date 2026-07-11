@@ -1,20 +1,24 @@
-# pricing-promo.v1 — minimal S-T8 topology contract (01 §1 `pricing-promo`).
-# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T8 merges.
-# `pricing-promo` owns quotes (saga step 1); the smoke's checkout→delivery walk
-# starts here. Grows additively per D30. Conventions (02 §1): /v1 paths,
-# snake_case, integer minor-unit Money, the 02 §2 error envelope on every non-2xx.
+# pricing-promo.v1 — the V-T8 pricing & quotes contract (01 §1 `pricing-promo`;
+# D10). Grown ADDITIVELY from the minimal S-T8 topology stub per D30 (1.0.0 →
+# 1.1.0): the Quote gained the signed-integrity fields (kid, signature,
+# issued_at, subtotal) and the create body an optional subtotal; the quote
+# lifecycle gained GET /v1/quotes/{quote_id} and the checkout consume verb. No
+# field was renamed or removed. `pricing-promo` owns quotes (saga step 1); the
+# smoke's checkout→delivery walk starts here. Conventions (02 §1): /v1 paths,
+# snake_case, integer minor-unit Money, typed fees[]/discounts[] line items
+# (02 §5), the 02 §2 error envelope on every non-2xx (tampered/expired ⇒ 422).
 openapi: 3.0.3
 info:
   title: pricing-promo
-  version: "1.0.0"
-  description: Quote engine — items, fees, surge, promos, vouchers (01 §1). Minimal E2E stub — quote.
+  version: "1.1.0"
+  description: Quote engine — items, fees, surge, promos, vouchers (01 §1 / D10). HMAC-signed quotes, 10-min TTL in Redis; PG persistence only at checkout.
 servers:
   - url: https://api.shop.io
 paths:
   /v1/quotes:
     post:
       operationId: create_quote
-      summary: Price a cart — returns a quote (10-min TTL). Saga step 1.
+      summary: Price a cart — returns an HMAC-signed quote (10-min TTL). Saga step 1. Gated by the pricing_v1 flag.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -27,6 +31,11 @@ paths:
               properties:
                 cart_id: { type: string, example: "crt_01H8XGJ2Q" }
                 voucher_code: { type: string, example: "LUNCH25" }
+                promo_code: { type: string, example: "PROMO10" }
+                # Optional additive (02 §5): a BFF holding the cart total may pass
+                # it to skip the cart round-trip; when absent, pricing CONSUMES the
+                # cart contract (GET /v1/carts/{cart_id}) for the authoritative subtotal.
+                subtotal: { $ref: "#/components/schemas/Money" }
                 delivery_location:
                   type: object
                   properties:
@@ -34,18 +43,67 @@ paths:
                     lng: { type: number, example: 100.5018 }
       responses:
         "201":
-          description: Quote created.
+          description: Quote created (signed; lives in the Redis-like 10-min TTL tier; NOT persisted to PG).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Quote" }
               example:
-                quote_id: "qot_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
-                total: { amount: 42550, currency: "THB" }
+                quote_id: "qot_01h8xgj2q7z9bq3m4n5p6r7s8t"
+                cart_id: "crt_01H8XGJ2Q"
+                currency: "THB"
+                subtotal: { amount: 40000, currency: "THB" }
                 fees:
                   - { type: "DELIVERY", amount: 1900, currency: "THB" }
+                  - { type: "SERVICE", amount: 4000, currency: "THB" }
                 discounts:
                   - { type: "VOUCHER", amount: -2500, currency: "THB" }
+                total: { amount: 43400, currency: "THB" }
+                issued_at: "2026-07-11T02:15:00Z"
                 expires_at: "2026-07-11T02:25:00Z"
+                kid: "hk_5f3a2b1c9d8e7f6a5b"
+                signature: "3q2-7z9BQ3M4N5P6R7S8T_aVbWcXdYeZf0g1h2i3j4"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/quotes/{quote_id}:
+    get:
+      operationId: get_quote
+      summary: Retrieve a live quote from the Redis-like TTL tier (verifies signature + expiry).
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+      responses:
+        "200":
+          description: The live quote.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quote" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/quotes/{quote_id}:checkout:
+    post:
+      operationId: checkout_quote
+      summary: Consume a signed quote at checkout — verifies integrity (tampered/expired ⇒ 422), then persists exactly one PG row. :action verb (02 §1).
+      parameters:
+        - $ref: "#/components/parameters/QuoteId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        description: The signed quote presented back for integrity verification.
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Quote" }
+      responses:
+        "200":
+          description: Quote verified + persisted (idempotent on quote_id).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [quote_id, status, persisted, total]
+                properties:
+                  quote_id: { type: string }
+                  status: { type: string, example: "CHECKED_OUT" }
+                  persisted: { type: boolean }
+                  total: { $ref: "#/components/schemas/Money" }
         default:
           $ref: "#/components/responses/Error"
 components:
@@ -55,6 +113,12 @@ components:
       in: header
       required: false
       description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+    QuoteId:
+      name: quote_id
+      in: path
+      required: true
+      description: The qot_ prefixed ULID of the quote.
       schema: { type: string }
   schemas:
     Money:
@@ -75,6 +139,9 @@ components:
       required: [quote_id, total, expires_at]
       properties:
         quote_id: { type: string }
+        cart_id: { type: string }
+        currency: { type: string }
+        subtotal: { $ref: "#/components/schemas/Money" }
         total: { $ref: "#/components/schemas/Money" }
         fees:
           type: array
@@ -82,7 +149,10 @@ components:
         discounts:
           type: array
           items: { $ref: "#/components/schemas/LineItem" }
+        issued_at: { type: string }
         expires_at: { type: string }
+        kid: { type: string }
+        signature: { type: string }
     Error:
       type: object
       required: [error]

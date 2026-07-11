@@ -1,0 +1,26 @@
+{
+  "consumer": { "name": "pricing-promo" },
+  "provider": { "name": "cart" },
+  "metadata": {
+    "note": "V-T8 pact: pricing-promo prices a cart_id (01 §1 'pricing-promo'; D10). This pins the read contract pricing depends on: GET /v1/carts/{cart_id} must return the cart's subtotal as Money (integer minor units + ISO currency) so the quote engine can price fees/discounts/total against it. When a request carries an explicit subtotal, pricing skips this read (02 §5 additive); otherwise it consumes this exact interaction. File-based broker, verified against the REAL cart booted by ci/pact-verify.sh, which pre-seeds crt_01hpactpricing0000000000000 with one line (provider state). The subtotal Money (amount + currency) + cart_id are pinned.",
+    "pactSpecification": { "version": "2.0.0" }
+  },
+  "interactions": [
+    {
+      "description": "read a cart's subtotal to price a quote",
+      "providerState": "a cart crt_01hpactpricing0000000000000 exists with subtotal 16000 THB",
+      "request": {
+        "method": "GET",
+        "path": "/v1/carts/crt_01hpactpricing0000000000000"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "cart_id": "crt_01hpactpricing0000000000000",
+          "currency": "THB",
+          "subtotal": { "amount": 16000, "currency": "THB" }
+        }
+      }
+    }
+  ]
+}

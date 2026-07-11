@@ -1,0 +1,15 @@
+# Kustomize base for the V-T8 pricing-promo slice (D10). Its own base dir
+# alongside the other slice bases (cart, merchant-catalog, feed-cache, ...).
+# Ships the Deployment + Service. Rendered + YAML-validated by
+# `make render-pricing` (mirrors `make render-cart`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml

@@ -168,5 +168,34 @@ echo "ranking healthy"
 sub "verify customer-bff -> ranking pact (re-rank top-K) — expect GREEN"
 "$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__ranking.json" "$RKBASE"
 
+# --- V-T8: pricing-promo -> cart pact (subtotal read), verified against the REAL
+# cart service. cart validates+prices its lines against the already-booted
+# merchant-catalog (CBASE), so we seed the pact's cart with 2× the Som Tam item
+# (2×8000 = 16000 THB) — the subtotal the pact pins for pricing to read. ---
+CARTPORT="${CART_PROVIDER_PORT:-18104}"
+CARTBASE="http://localhost:$CARTPORT"
+CART_PID=""
+cart_cleanup() { [ -n "$CART_PID" ] && kill "$CART_PID" 2>/dev/null || true; }
+trap 'cleanup; id_cleanup; p_cleanup; c_cleanup; s_cleanup; rk_cleanup; cart_cleanup' EXIT
+
+sub "build + boot cart provider (V-T7) on $CARTBASE (cart_v1 on; CATALOG_URL->$CBASE)"
+( cd services/cart && "$GO" build -o "$BIN/cart" . )
+PORT="$CARTPORT" SERVICE_NAME=cart ENV=dev FLAG_CART_V1=true CATALOG_URL="$CBASE" "$BIN/cart" >"$BIN/cart.log" 2>&1 &
+CART_PID=$!
+for _ in $(seq 1 40); do curl -fsS --max-time 1 "$CARTBASE/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -fsS --max-time 2 "$CARTBASE/healthz" >/dev/null || { echo "cart never healthy"; cat "$BIN/cart.log"; exit 1; }
+echo "cart healthy"
+
+# Provider state: a cart crt_01hpactpricing0000000000000 with subtotal 16000 THB.
+# The Som Tam item_id is dynamic — read it from the catalog menu we seeded above.
+PACT_ITEM="$(curl -s "$CBASE/v1/merchants/$CMID/menu" | sed -n 's/.*"item_id":"\([^"]*\)".*/\1/p' | head -1)"
+[ -n "$PACT_ITEM" ] || { echo "failed to resolve pact catalog item_id"; exit 1; }
+curl -fsS -X POST "$CARTBASE/v1/carts/crt_01hpactpricing0000000000000/items" -H 'Content-Type: application/json' \
+  -d '{"item_id":"'"$PACT_ITEM"'","merchant_id":"'"$CMID"'","quantity":2}' >/dev/null \
+  || { echo "failed to seed pact cart"; exit 1; }
+
+sub "verify pricing-promo -> cart pact (subtotal read) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/pricing-promo__cart.json" "$CARTBASE"
+
 echo
-echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog + search + ranking honour their pacts; broken pact correctly reds the build"
+echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog + search + ranking + cart honour their pacts; broken pact correctly reds the build"
