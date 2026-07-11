@@ -1,0 +1,64 @@
+# Shop platform CI scaffold (S-T1). GitHub-Actions-shaped.
+#
+# ACTIVATION: this file lives at shop/ci/pipeline.yml on purpose. This repo is
+# NOT the shop monorepo; when shop/ is extracted to its own repository, move
+# this file to .github/workflows/pipeline.yml and it runs as-is. Until then the
+# identical stages run locally via ci/run-local.sh (and `make`), so the scaffold
+# is exercised without a live Actions runner.
+#
+# S-T2 extends this into the full pipeline (04 §1.2): lint -> unit -> contract
+# -> build/sign -> integration -> preview E2E -> security scan. S-T1 ships the
+# green skeleton: lint/build, change-detection, render, and smoke.
+name: shop-ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  changes:
+    # Path-based change detection: compute the buildable paths this PR touches
+    # so downstream build/test only run for affected modules.
+    runs-on: ubuntu-latest
+    outputs:
+      paths: ${{ steps.detect.outputs.paths }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        working-directory: shop
+        run: |
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          tools/changed-paths.sh --base "origin/${{ github.base_ref || 'main' }}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+  build-test:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: lint + build + unit (placeholder & gateway)
+        working-directory: shop
+        run: make test
+      - name: render kustomize overlays
+        working-directory: shop
+        run: make render
+
+  smoke:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: boot stack + smoke
+        working-directory: shop
+        run: |
+          make up
+          make smoke
+          make down

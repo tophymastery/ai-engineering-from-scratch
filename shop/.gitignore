@@ -1,0 +1,7 @@
+# Runtime state from `make up` (process-mode binaries, pidfiles, logs).
+/.run/
+# Transient Kustomize render output (make render cleans these, belt-and-braces).
+/.render-*.yaml
+# Compiled binaries from `go build ./...` run inside a module dir.
+/gateway/gateway
+/services/_placeholder/placeholder

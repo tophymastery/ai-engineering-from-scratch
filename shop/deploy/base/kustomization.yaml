@@ -1,0 +1,17 @@
+# Kustomize base for the S-T1 empty stack: the gateway edge plus one
+# placeholder downstream, each a Deployment + Service. Overlays under
+# ../overlays/{dev,preview,staging,prod} patch replica counts and stamp the
+# env-name label. Real services add their own base dirs alongside these.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - placeholder-deployment.yaml
+  - placeholder-service.yaml
+  - gateway-deployment.yaml
+  - gateway-service.yaml

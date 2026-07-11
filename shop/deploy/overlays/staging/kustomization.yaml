@@ -1,0 +1,19 @@
+# staging overlay: main auto-syncs here (04 §1.3). Modest redundancy.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namePrefix: staging-
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      env-name: staging
+    includeSelectors: false
+
+replicas:
+  - name: gateway
+    count: 2
+  - name: placeholder
+    count: 2

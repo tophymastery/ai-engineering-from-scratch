@@ -1,0 +1,19 @@
+# dev overlay: single replicas, env-name=dev label. Lowest-footprint target.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namePrefix: dev-
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      env-name: dev
+    includeSelectors: false
+
+replicas:
+  - name: gateway
+    count: 1
+  - name: placeholder
+    count: 1
