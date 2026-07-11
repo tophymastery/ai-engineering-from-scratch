@@ -1,0 +1,18 @@
+# Kustomize base for the V-T4 Search & browse slice (D17 + D11). Its own base dir
+# alongside the merchant-catalog / identity-profile bases. Ships the two service
+# Deployments (search-query, search-indexer) + Services, and the per-cell
+# OpenSearch topology (data nodes + DEDICATED ingest nodes, D17) as render-only
+# StatefulSets — there is no OpenSearch/K8s in this sandbox, so these are verified
+# by `make render-search` (kustomize build + yamlcheck), not deployed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - opensearch.yaml

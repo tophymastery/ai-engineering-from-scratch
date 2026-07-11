@@ -30,6 +30,16 @@
         "merchant_id": { "type": "string", "description": "mer_ token." },
         "version": { "type": "integer", "description": "monotonic menu version; lets consumers order/dedupe edits." },
         "menu_etag": { "type": "string", "description": "strong validator; correlates with the HTTP ETag." },
+        "merchant_name": { "type": "string", "description": "OPTIONAL (D30 additive, V-T4): display name for the search/browse read model. Producers may omit it." },
+        "location": {
+          "type": "object",
+          "description": "OPTIONAL (D30 additive, V-T4): store geo-point so the search indexer can place the merchant on its H3-res-5 shard. Producers may omit it (the store is then non-geo-queryable until a located update arrives).",
+          "required": ["lat", "lng"],
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" }
+          }
+        },
         "items": {
           "type": "array",
           "description": "the full current item set (snapshot).",

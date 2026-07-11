@@ -1,12 +1,12 @@
-# search.v1 — minimal S-T8 topology contract (01 §1 `search`).
-# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T4 merges.
-# Grows additively per D30. Conventions (02 §1): /v1 paths, snake_case fields,
-# the 02 §2 error envelope on every non-2xx.
+# search.v1 — 01 §1 `search`. S-T8 shipped a read stub (geo search); V-T4 grows it
+# ADDITIVELY (D30): the customer browse feed (GET /v1/customer/home) + the index
+# ingest surface. Conventions (02 §1): /v1 paths, snake_case fields, the 02 §2
+# error envelope on every non-2xx.
 openapi: 3.0.3
 info:
   title: search
-  version: "1.0.0"
-  description: Store/dish discovery (01 §1). Minimal E2E stub surface — geo search.
+  version: "1.1.0"
+  description: Store/dish discovery + browse feed (01 §1; V-T4 implements D17/D11).
 servers:
   - url: https://api.shop.io
 paths:
@@ -30,6 +30,55 @@ paths:
                 next_cursor: null
         default:
           $ref: "#/components/responses/Error"
+  /v1/customer/home:
+    get:
+      operationId: browse_home
+      summary: Customer browse feed — nearby open stores (search) + fees + ratings (02 §4.2).
+      description: >
+        The customer-bff browse endpoint (gateway passthrough). Aggregates nearby
+        OPEN stores from the search index with a delivery fee (pricing-promo) and
+        the merchant rating (from the rating.updated projection). Gated by the
+        `search_v2` flag (404 SEARCH_DISABLED when dark).
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, example: 13.7563 } }
+        - { name: lng, in: query, required: true, schema: { type: number, example: 100.5018 } }
+      responses:
+        "200":
+          description: Browse feed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HomeFeed" }
+              example:
+                location: { lat: 13.7563, lng: 100.5018 }
+                feed:
+                  - { store_id: "mer_01H8XGABCDE", name: "Som Tam House", rating: 4.7, distance_m: 820, open: true, delivery_fee: { amount: 1500, currency: "THB" }, eta_minutes: 15 }
+                next_cursor: null
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/index/events:
+    post:
+      operationId: index_publish_event
+      summary: Publish a merchant event onto the projection bus (ingest; demo/freshness).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: "A 02 §4.3 event envelope (menu.updated / store.status_changed / rating.updated)." }
+      responses:
+        "202": { description: Accepted for indexing. }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/index/merchants:
+    post:
+      operationId: index_upsert_doc
+      summary: Upsert a search document directly (admin/seed ingest).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchDoc" }
+      responses:
+        "202": { description: Indexed. }
+        default: { $ref: "#/components/responses/Error" }
 components:
   schemas:
     Hit:
@@ -50,6 +99,61 @@ components:
         next_cursor:
           type: [string, "null"]
           description: "Cursor pagination (02 §1) — null at end."
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, description: "integer minor units (02 §1 Money)." }
+        currency: { type: string, example: "THB" }
+    FeedItem:
+      type: object
+      required: [store_id, name, open]
+      properties:
+        store_id: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        distance_m: { type: integer }
+        open: { type: boolean }
+        delivery_fee: { $ref: "#/components/schemas/Money" }
+        eta_minutes: { type: integer }
+    HomeFeed:
+      type: object
+      required: [location, feed]
+      properties:
+        location:
+          type: object
+          required: [lat, lng]
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+        feed:
+          type: array
+          items: { $ref: "#/components/schemas/FeedItem" }
+        next_cursor:
+          type: [string, "null"]
+          description: "Cursor pagination (02 §1) — null at end."
+    SearchDoc:
+      type: object
+      required: [merchant_id]
+      properties:
+        merchant_id: { type: string }
+        name: { type: string }
+        lat: { type: number }
+        lng: { type: number }
+        open: { type: boolean }
+        rating: { type: number }
+        rating_count: { type: integer }
+        menu_version: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              item_id: { type: string }
+              name: { type: string }
+              amount: { type: integer }
+              currency: { type: string }
+              available: { type: boolean }
     Error:
       type: object
       required: [error]

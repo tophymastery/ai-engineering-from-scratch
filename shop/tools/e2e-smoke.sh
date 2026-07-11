@@ -245,6 +245,54 @@ else
   assert_body "menu read reflects the edit" GET "/merchant-bff/v1/merchants/$CMID/menu" '"Som Tam"'
 fi
 
+# --- 14. V-T4 search & browse (D17/D11) — GATED on the search slot being REAL
+# (the stub can't index/route). Demoed THROUGH the customer-bff browse passthrough
+# (gateway routes /customer-bff/v1/customer/home + /v1/search -> search-query,
+# behind search_v2). Proves: browse feed, geo search, and freshness (event ->
+# queryable) via the real in-process index. ---
+echo "== V-T4 search & browse (seed -> browse feed -> geo search -> freshness, via customer-bff) =="
+SEARCH_MODE="$(awk -F'\t' '$1=="search"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$SEARCH_MODE" != "real" ]; then
+  echo "  SKIP: search slot mode='$SEARCH_MODE' (not real) — search section runs only when search-query is the real slot"
+else
+  SMID="mer_e2e_search_$$"
+  SLAT=13.7563; SLNG=100.5018
+  # Seed an OPEN store directly into the index (admin ingest) at the browse point.
+  SDOC='{"merchant_id":"'"$SMID"'","name":"E2E Som Tam","lat":'"$SLAT"',"lng":'"$SLNG"',"open":true,"rating":4.8,"menu_version":1,"items":[{"item_id":"i1","name":"Som Tam","amount":8000,"currency":"THB","available":true}]}'
+  assert_status "seed search doc (ingest)" POST "/search/v1/index/merchants" 202 "$SDOC"
+
+  # Browse feed via customer-bff -> nearby OPEN stores with fee + rating.
+  assert_body "browse feed lists the store" GET "/customer-bff/v1/customer/home?lat=$SLAT&lng=$SLNG" "\"store_id\":\"$SMID\""
+  assert_body "browse feed carries a delivery fee" GET "/customer-bff/v1/customer/home?lat=$SLAT&lng=$SLNG" '"delivery_fee"'
+  assert_body "browse feed carries the rating"     GET "/customer-bff/v1/customer/home?lat=$SLAT&lng=$SLNG" '"rating":4.8'
+
+  # Geo search via customer-bff (text query).
+  assert_body "geo search finds the dish" GET "/customer-bff/v1/search?lat=$SLAT&lng=$SLNG&q=som%20tam" "\"store_id\":\"$SMID\""
+
+  # A far-away query must NOT return it (H3-res-5 geo routing).
+  assert_body "far query excludes the store" GET "/customer-bff/v1/search?lat=18.79&lng=98.99&q=som%20tam" '"results":[]'
+
+  # Freshness: publish a menu.updated EVENT for a NEW merchant and time how long
+  # until it is queryable (event -> queryable). Budget: p99 < 30s (D17).
+  FMID="mer_e2e_fresh_$$"
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  FENV='{"event_id":"evt_e2e_fresh_'"$$"'","event_type":"menu.updated","occurred_at":"'"$NOW"'","trace_id":"t_e2e","aggregate":{"type":"merchant","id":"'"$FMID"'","region":"bkk"},"schema_version":1,"payload":{"merchant_id":"'"$FMID"'","version":1,"merchant_name":"Fresh E2E","location":{"lat":'"$SLAT"',"lng":'"$SLNG"'},"items":[{"item_id":"fi1","name":"Green Curry","amount":9000,"currency":"THB","available":true}]}}'
+  assert_status "publish menu.updated event" POST "/search/v1/index/events" 202 "$FENV"
+  t0="$(date +%s%3N 2>/dev/null || date +%s)"; fresh=0; lag_ms=0
+  for _ in $(seq 1 100); do
+    body="$(curl -s --max-time 5 "$GW/customer-bff/v1/search?lat=$SLAT&lng=$SLNG&q=green%20curry" 2>/dev/null)"
+    if [[ "$body" == *"\"store_id\":\"$FMID\""* ]]; then
+      t1="$(date +%s%3N 2>/dev/null || date +%s)"; lag_ms=$((t1 - t0)); fresh=1; break
+    fi
+    sleep 0.05
+  done
+  if [ "$fresh" = 1 ] && [ "$lag_ms" -lt 30000 ]; then
+    pass "event -> queryable freshness ${lag_ms}ms (< 30s budget, D17)"
+  else
+    bad "event not queryable within 30s (freshness FAILED)"
+  fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

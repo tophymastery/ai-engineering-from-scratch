@@ -1,0 +1,73 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: search
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: discovery
+    slice: V-T4
+    decisions: D17-D11
+spec:
+  groups:
+    # SLOs (V-T4 / D17):
+    #   - query p99 < 150 ms
+    #   - >=99% of geo queries touch <=2 shards
+    #   - freshness (event -> queryable) p99 < 30 s
+    #   - bulk-index backpressure keeps feed p99 stable; ingest backlog bounded
+    #   - salted merchant keys stay balanced (hottest salt < 2x mean)
+    - name: search.latency
+      rules:
+        - alert: SearchQueryLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(search_query_duration_seconds_bucket[5m])) by (le, route)) > 0.15
+          for: 10m
+          labels: { severity: warning, team: discovery }
+          annotations:
+            summary: "search query p99 > 150ms ({{ $labels.route }})"
+            description: "Geo/browse query p99 budget (150ms) is burning. Check OpenSearch data-node load / shard fan-out. Runbook: docs/runbooks/search.md."
+
+    - name: search.freshness
+      rules:
+        - alert: SearchFreshnessLagHigh
+          expr: histogram_quantile(0.99, sum(rate(search_freshness_lag_seconds_bucket[5m])) by (le)) > 30
+          for: 5m
+          labels: { severity: critical, team: discovery }
+          annotations:
+            summary: "search freshness p99 > 30s (event -> queryable)"
+            description: "menu.updated / store.status_changed / rating.updated take >30s to become queryable. Check the indexer consumer lag + OpenSearch ingest pipeline. Stale results / closed stores shown. Runbook: docs/runbooks/search.md."
+
+    - name: search.routing
+      rules:
+        - alert: SearchShardFanoutHigh
+          expr: (sum(rate(search_geo_queries_shards_touched_total{buckets=">2"}[10m])) / sum(rate(search_geo_queries_total[10m]))) > 0.01
+          for: 15m
+          labels: { severity: warning, team: discovery }
+          annotations:
+            summary: "search: >1% of geo queries touch >2 shards"
+            description: "The H3-res-5 shard routing invariant (>=99% of geo queries touch <=2 shards, D17) is degrading — a hot-spot or a mis-sized shard-tile. Runbook: docs/runbooks/search.md."
+
+    - name: search.ingest
+      rules:
+        - alert: SearchIngestBacklogGrowing
+          expr: max(search_ingest_queue_depth) > 5000
+          for: 10m
+          labels: { severity: warning, team: discovery }
+          annotations:
+            summary: "search ingest backlog > 5000 (bulk-index backpressure engaged)"
+            description: "The dedicated ingest nodes are behind; bulk-index backpressure is throttling. Sustained backlog delays freshness. Check a large chain reindex / ingest-node capacity. Runbook: docs/runbooks/search.md."
+        - alert: SearchSaltPartitionSkew
+          expr: (max(search_salt_partition_docs) / avg(search_salt_partition_docs)) > 2
+          for: 30m
+          labels: { severity: warning, team: discovery }
+          annotations:
+            summary: "search: hottest merchant salt partition > 2x mean"
+            description: "The D11 salted merchant keys (merchant_id#0..15) are unbalanced — the hottest partition holds >2x the mean, re-introducing a celebrity-merchant hot spot. Runbook: docs/runbooks/search.md."
+
+    - name: search.rating
+      rules:
+        - alert: SearchRatingDebounceIneffective
+          expr: (sum(rate(search_rating_index_writes_total[5m])) / sum(rate(search_rating_events_total[5m]))) > 0.2
+          for: 15m
+          labels: { severity: warning, team: discovery }
+          annotations:
+            summary: "search rating debounce writing >20% of rating events to the index"
+            description: "The rating debounce (<=1 index write / merchant / 5 min, D17) is not coalescing — a bug or a clock skew is letting rating floods through to the index. Runbook: docs/runbooks/search.md."

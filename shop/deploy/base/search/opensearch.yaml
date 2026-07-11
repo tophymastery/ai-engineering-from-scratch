@@ -1,0 +1,120 @@
+# Per-cell OpenSearch topology (D17): "Per-cell OpenSearch, index per country,
+# shard routing by H3 res-5 … ~24 data nodes + dedicated ingest nodes." Expressed
+# here as two node pools so the read path (query on data nodes) is isolated from
+# the write path (bulk-index on DEDICATED ingest nodes) — the physical form of the
+# bulk-index-backpressure property. RENDER-ONLY in this sandbox (no OpenSearch/K8s):
+# `make render-search` proves it renders + parses; the routing/salting/debounce/
+# backpressure LOGIC is exercised for real in services/search-indexer/index.
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: search-opensearch-data
+  labels:
+    app: search-opensearch
+    shop.io/role: data
+    shop.io/team: discovery
+spec:
+  serviceName: search-opensearch-data
+  # D17: ~24 data nodes in the largest cell (index-per-country, H3-res-5 shard
+  # routing so a geo query touches 1–2 shards).
+  replicas: 24
+  selector:
+    matchLabels:
+      app: search-opensearch
+      shop.io/role: data
+  template:
+    metadata:
+      labels:
+        app: search-opensearch
+        shop.io/role: data
+    spec:
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.13.0
+          ports:
+            - { name: http, containerPort: 9200 }
+            - { name: transport, containerPort: 9300 }
+          env:
+            - { name: node.roles, value: "data,ingest_disabled" }
+            - { name: cluster.name, value: "search-bkk" }
+            - { name: OPENSEARCH_JAVA_OPTS, value: "-Xms4g -Xmx4g" }
+          resources:
+            requests: { cpu: "4", memory: "8Gi" }
+            limits: { cpu: "8", memory: "16Gi" }
+          volumeMounts:
+            - { name: data, mountPath: /usr/share/opensearch/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 200Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: search-opensearch-ingest
+  labels:
+    app: search-opensearch
+    shop.io/role: ingest
+    shop.io/team: discovery
+spec:
+  serviceName: search-opensearch-ingest
+  # DEDICATED ingest nodes (D17): bulk-index pipeline with backpressure lands here,
+  # so a 150k-item chain-menu reindex never contends with feed reads on the data
+  # nodes. Scaled independently of the data tier.
+  replicas: 6
+  selector:
+    matchLabels:
+      app: search-opensearch
+      shop.io/role: ingest
+  template:
+    metadata:
+      labels:
+        app: search-opensearch
+        shop.io/role: ingest
+    spec:
+      containers:
+        - name: opensearch-ingest
+          image: opensearchproject/opensearch:2.13.0
+          ports:
+            - { name: http, containerPort: 9200 }
+          env:
+            - { name: node.roles, value: "ingest" }
+            - { name: cluster.name, value: "search-bkk" }
+            - { name: OPENSEARCH_JAVA_OPTS, value: "-Xms2g -Xmx2g" }
+          resources:
+            requests: { cpu: "2", memory: "4Gi" }
+            limits: { cpu: "4", memory: "8Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-opensearch-data
+  labels:
+    app: search-opensearch
+    shop.io/role: data
+spec:
+  clusterIP: None
+  selector:
+    app: search-opensearch
+    shop.io/role: data
+  ports:
+    - { name: http, port: 9200, targetPort: 9200 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-opensearch-ingest
+  labels:
+    app: search-opensearch
+    shop.io/role: ingest
+spec:
+  selector:
+    app: search-opensearch
+    shop.io/role: ingest
+  ports:
+    - { name: http, port: 9200, targetPort: 9200 }

@@ -30,6 +30,15 @@
         "merchant_id": { "type": "string" },
         "version": { "type": "integer" },
         "menu_etag": { "type": "string" },
+        "merchant_name": { "type": "string" },
+        "location": {
+          "type": "object",
+          "required": ["lat", "lng"],
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" }
+          }
+        },
         "items": {
           "type": "array",
           "items": {

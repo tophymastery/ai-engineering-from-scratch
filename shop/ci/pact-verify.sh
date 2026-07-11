@@ -124,5 +124,29 @@ sub "verify search -> merchant-catalog pact (menu + store-status reads) — expe
 sub "verify cart -> merchant-catalog pact (item price + availability read) — expect GREEN"
 "$REG" pact-verify "$ROOT/contracts/pacts/cart__merchant-catalog.json" "$CBASE"
 
+# --- V-T4: customer-bff -> search (browse feed + geo search), verified against
+# the REAL search-query service (search_v2 on) ---
+SPORT="${SEARCH_PROVIDER_PORT:-18103}"
+SBASE="http://localhost:$SPORT"
+S_PID=""
+s_cleanup() { [ -n "$S_PID" ] && kill "$S_PID" 2>/dev/null || true; }
+trap 'cleanup; id_cleanup; p_cleanup; c_cleanup; s_cleanup' EXIT
+
+sub "build + boot search-query provider (V-T4) on $SBASE (search_v2 on)"
+( cd services/search-query && "$GO" build -o "$BIN/search-query" . )
+PORT="$SPORT" SERVICE_NAME=search-query ENV=dev FLAG_SEARCH_V2=true "$BIN/search-query" >"$BIN/search.log" 2>&1 &
+S_PID=$!
+for _ in $(seq 1 40); do curl -fsS --max-time 1 "$SBASE/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -fsS --max-time 2 "$SBASE/healthz" >/dev/null || { echo "search-query never healthy"; cat "$BIN/search.log"; exit 1; }
+echo "search-query healthy"
+
+# Provider state: seed the fixed store at the pact's query point.
+curl -fsS -X POST "$SBASE/v1/index/merchants" -H 'Content-Type: application/json' \
+  -d '{"merchant_id":"mer_01hpactsearch000000000000","name":"Pact Som Tam","lat":13.7563,"lng":100.5018,"open":true,"rating":4.7,"menu_version":1,"items":[{"item_id":"itm_p","name":"Som Tam","amount":8000,"currency":"THB","available":true}]}' >/dev/null \
+  || { echo "failed to seed pact search doc"; exit 1; }
+
+sub "verify customer-bff -> search pact (browse feed + geo search) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__search.json" "$SBASE"
+
 echo
-echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog honour their pacts; broken pact correctly reds the build"
+echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog + search honour their pacts; broken pact correctly reds the build"
