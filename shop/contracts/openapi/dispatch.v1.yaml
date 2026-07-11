@@ -1,0 +1,90 @@
+# dispatch.v1 — minimal S-T8 topology contract (01 §1 `dispatch`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T12 merges.
+# The real dispatch service consumes map-sim ETAs. Grows additively per D30.
+# Conventions (02 §1): /v1 paths, snake_case, the 02 §2 error envelope on non-2xx.
+openapi: 3.0.3
+info:
+  title: dispatch
+  version: "1.0.0"
+  description: Driver matching & assignment (01 §1). Minimal E2E stub — assign a paid order.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/assignments:
+    post:
+      operationId: assign_order
+      summary: Assign a driver to a paid order (batch matching lands in V-T12). Saga step 4.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_id]
+              properties:
+                order_id: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+      responses:
+        "201":
+          description: Driver assigned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Assignment" }
+              example:
+                assignment_id: "asg_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                driver_id: "drv_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "ASSIGNED"
+                eta_minutes: 24
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    Assignment:
+      type: object
+      required: [assignment_id, order_id, driver_id, status]
+      properties:
+        assignment_id: { type: string }
+        order_id: { type: string }
+        driver_id: { type: string }
+        status: { type: string, enum: [ASSIGNED, PICKED_UP, DELIVERED, FAILED] }
+        eta_minutes: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx (no driver => saga compensation)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "NO_DRIVER_AVAILABLE"
+              message: "No driver within the widening radius."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: true

@@ -1,0 +1,90 @@
+# identity.v1 — minimal S-T8 topology contract (01 §1 `identity`).
+# One resource (+ runtime /healthz from stubgen) so the shared E2E env can boot a
+# contract stub for identity until the V-T1 slice merges its real implementation.
+# Grows additively per D30 when that slice ships. Conventions (02 §1): /v1 paths,
+# snake_case fields, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: identity
+  version: "1.0.0"
+  description: Accounts & sessions (01 §1). Minimal E2E stub surface — login.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/sessions:
+    post:
+      operationId: create_session
+      summary: Login — exchange credentials for a session (register/login/refresh land in V-T1).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, example: "diner@example.com" }
+                password: { type: string, example: "correct horse battery staple" }
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+              example:
+                session_id: "ses_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                user_id: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                access_token: "eyJhbGciOiJFUzI1NiJ9.stub.stub"
+                expires_at: "2026-07-11T02:30:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    Session:
+      type: object
+      required: [session_id, user_id, access_token, expires_at]
+      properties:
+        session_id: { type: string }
+        user_id: { type: string }
+        access_token: { type: string }
+        expires_at: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "UNAUTHENTICATED"
+              message: "Invalid credentials."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

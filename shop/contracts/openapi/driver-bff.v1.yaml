@@ -1,0 +1,103 @@
+# driver-bff.v1 — client-shaped BFF contract (01 §2, 02 §4.2). Minimal S-T8
+# topology surface (+ runtime /healthz) so the E2E env boots a stub until the
+# logistics slices merge. One resource (driver order-lifecycle) with the two
+# driver-event :action verbs the smoke walks (pickup, deliver). Conventions
+# (02 §1): /v1 paths, snake_case, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: driver-bff
+  version: "1.0.0"
+  description: Driver BFF — offer card + trip lifecycle (01 §2). Minimal E2E stub — pickup/deliver.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/driver/orders/{order_id}:pickup:
+    post:
+      operationId: driver_pickup
+      summary: Driver confirms pickup — saga step 5 (DISPATCHED -> PICKED_UP). :action verb.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Pickup recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TripEvent" }
+              example:
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "PICKED_UP"
+                at: "2026-07-11T02:45:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/driver/orders/{order_id}:deliver:
+    post:
+      operationId: driver_deliver
+      summary: Driver confirms delivery — saga step 5 (PICKED_UP -> DELIVERED). :action verb.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Delivery recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TripEvent" }
+              example:
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "DELIVERED"
+                at: "2026-07-11T02:58:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    OrderId:
+      name: order_id
+      in: path
+      required: true
+      schema: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    TripEvent:
+      type: object
+      required: [order_id, status]
+      properties:
+        order_id: { type: string }
+        status: { type: string, enum: [PICKED_UP, DELIVERED] }
+        at: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "ORDER_INVALID_TRANSITION"
+              message: "Order ord_01H8… is not DISPATCHED."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

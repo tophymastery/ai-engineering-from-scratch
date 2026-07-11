@@ -609,3 +609,84 @@ make contract-validate             # 3 new adapter contracts pass the gate
 make up && make seed SCENARIO=lunch-rush && make smoke && make down   # end-to-end seed via public APIs
 ./ci/run-local.sh                  # FULL 12-stage pipeline — exits 0
 ```
+
+---
+
+# S-T8 Verification (Shared E2E environment + continuous-integration smoke)
+
+## Environment realities
+
+- Same as S-T1: **no Docker daemon, no K8s cluster**. The shared E2E env runs in
+  **process mode** (the `tools/e2e-up.sh` fallback), identical mechanism to
+  `make up`: std-lib Go binaries + curl, no infra. Everything below ran for real.
+- **No V-slice service binaries exist in this repo** (they are V-T1..V-T37, not
+  built here). So a slot in `mode: real` is booted from `real_cmd`, which points
+  at either the genuine compiled `_placeholder` service (a real, independently
+  built Go binary) or the documented contract-server alias
+  (`tools/e2e-realcmd.sh`, which execs the shipped `stubgen`). This is the honest
+  simulation the task authorises ("mark `real_cmd` = stub-binary alias"); in
+  production `real_cmd` is the merged slice binary and the launch path
+  (PORT/CONTRACT/SERVICE_NAME in env) is **byte-identical**, so the swap machinery
+  under test is exactly the machinery a real merge uses.
+
+## What was built
+
+- **14 new minimal OpenAPI contracts** so `stubgen` can boot 100% of the topology
+  (`contracts/openapi/{identity,merchant-catalog,search,cart,payment,pricing-promo,
+  dispatch,location-tracking,notification,rating,settlement,merchant-bff,driver-bff,
+  admin-bff}.v1.yaml`). All pass `contract-validate` (19 OpenAPI files GREEN).
+- **`deploy/e2e/topology.yaml`** — the single-source manifest: 12 catalog services
+  + 4 BFFs + 3 S-T7 fakes, each with `{name, port, mode, contract, real_cmd}`.
+- **`tools/e2ectl`** — the one manifest+overlay resolver (plan / routes / sync /
+  count / set-overlay); every `e2e-*.sh` script shells out to it.
+- **`tools/e2e-up.sh` / `e2e-down.sh` / `e2e-smoke.sh` / `e2e-swap.sh` /
+  `e2e-realcmd.sh`**, **`ci/post-merge-smoke.sh`**, **`ownership.yaml`**, Makefile
+  targets `e2e-up/e2e-down/e2e-smoke/e2e-swap/e2e-sync/post-merge-smoke`, and a new
+  E2E stage in `ci/run-local.sh`.
+- **`stubgen`** gained a built-in `/healthz` (so any `/v1`-only contract is
+  healthcheckable) and an opt-in `-idempotency` replay header (both backward
+  compatible; existing tests untouched, one added). **`gateway`** gained
+  `GATEWAY_ROUTES` file support (default placeholder route when unset).
+
+## DoD / test-criteria matrix
+
+| # | S-T8 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | E2E env live with 100% of the catalog present (stub or real) | **full** | `make e2e-up` boots **19 slots (12 services + 4 BFFs + 3 fakes) + gateway = 20 processes**, all `/healthz` green, in **~3 s**; gateway routing to a slot verified end-to-end. |
+| DoD-2 | Stub→real swap automatic from deploy manifests | **full (adapted binary)** | Swap is driven from a runtime overlay (`.run/e2e-overlay.yaml`), never by editing the manifest; `e2e-up` re-reads manifest+overlay every invocation. `make e2e-sync` promotes any slot whose `real_cmd` binary exists (proven on a crafted manifest: `order` real_cmd → mode=real; empty slots stay stub). |
+| DoD-2 | Smoke runs post-merge and pages the merging team on red | **full** | `ci/post-merge-smoke.sh <svc>` runs sync+up+smoke+down; on red emits `PAGE team="…" service="…"`. Team resolved from `ownership.yaml`. |
+| Test | Smoke green at **all-stubs** | **full** | 16 stub + 3 fake + 0 real → **21/21 GREEN**. |
+| Test | Smoke green at **one-real** | **full** | `e2e-swap rating` to the genuine compiled `_placeholder` binary → 15 stub + 3 fake + **1 real** → **21/21 GREEN** (rating slot serves the real service, not a stub). |
+| Test | Smoke green at **all-real-but-one** | **full (documented simulation)** | Overlay flips all 16 service/BFF slots to real (rating = genuine placeholder; the other 15 = `e2e-realcmd.sh` contract-server alias) leaving `settlement` the single stub → 1 stub + 3 fake + **15 real** → **21/21 GREEN**. Proves the smoke is fully mode-agnostic across the path. |
+| Test | Stub-swap latency < 15 min | **full** | `e2e-swap` measured wall-time **~1.77 s** (`SWAP_WALL_MS=1774`), gateway kept routing (no gateway restart). Budget 15 min; expectation "seconds" met. |
+| Verify | Kill one service mid-smoke ⇒ smoke red | **full** | Killed the `order` slot → `e2e-smoke` **RED** (checkout hop 502, health sweep 18/19), exit 2. |
+| Verify | Red-path PAGE names the owning team | **full** | Deterministically broke `pricing-promo` (healthy-but-wrong-contract binary) → `post-merge-smoke pricing-promo` emitted `PAGE team="Growth" service="pricing-promo" …` (matches `ownership.yaml`). |
+| Verify | `ci/run-local.sh` FULL pipeline exit 0 with the new E2E stage | **full** | Ran end to end → **exit 0**; stage `[12/13]` booted the 20-process topology and `e2e-smoke` **21/21 GREEN**. |
+
+## Deviations (adapted, not skipped)
+
+1. **`real` mode = real launch path, aliased binary.** No slice service binaries
+   exist in this repo, so `mode: real` boots the genuine `_placeholder` binary or
+   the `e2e-realcmd.sh` contract-server. The **swap mechanism, overlay, gateway
+   re-routing, and healthchecks are the production ones**; only the target binary
+   is a stand-in. Documented in `tools/e2e-realcmd.sh` and `deploy/e2e/topology.yaml`.
+2. **`/healthz` is a stubgen runtime endpoint, not a contract path.** Health is
+   `/healthz` (unversioned) but `contract-validate` requires every path under
+   `/v1/`. So each contract declares its one `/v1` resource and `stubgen` serves
+   `/healthz` natively — this is what lets stubgen boot 100% of a `/v1`-only
+   topology.
+3. **Process mode, not Docker/K8s** (daemon/cluster absent) — identical observable
+   topology; "GitOps watcher swaps stub→real on merge" is documented as the
+   production form of `make e2e-sync` + `ci/post-merge-smoke.sh`.
+
+## Commands to reproduce
+
+```
+make e2e-up                         # boot 20 processes (12 svc + 4 BFF + 3 fakes + gateway), all healthy
+make e2e-smoke                      # checkout->delivery, 21/21 across the full topology (mode-agnostic)
+SVC=rating REALCMD=.run/e2e/bin/placeholder-real make e2e-swap   # stub->real swap, prints SWAP_WALL_MS
+make e2e-sync                       # detect merged real_cmd binaries and swap them into the overlay
+ci/post-merge-smoke.sh pricing-promo  # merge-webhook target: PAGEs the owning team on red
+make e2e-down --reset               # tear down + clear swaps
+./ci/run-local.sh                   # FULL 13-stage pipeline incl. the E2E stage — exits 0
+```

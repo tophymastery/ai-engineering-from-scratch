@@ -1,0 +1,83 @@
+# settlement.v1 — minimal S-T8 topology contract (01 §1 `settlement`).
+# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T19 merges.
+# The real service ingests payment-sim settlement files. Grows additively per D30.
+# Conventions (02 §1): /v1 paths, snake_case, error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: settlement
+  version: "1.0.0"
+  description: Merchant/driver payouts & reconciliation (01 §1). Minimal E2E stub — payout report.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/payouts/{payout_id}:
+    get:
+      operationId: get_payout
+      summary: Read a payout run's report (accrual + reconciliation land in V-T19).
+      parameters:
+        - name: payout_id
+          in: path
+          required: true
+          schema: { type: string, example: "pay_run_01H8XGJ2Q" }
+      responses:
+        "200":
+          description: Payout report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payout" }
+              example:
+                payout_id: "pay_run_01H8XGJ2Q"
+                merchant_id: "mer_01H8XGABCDE"
+                amount: { amount: 380000, currency: "THB" }
+                status: "COMPLETED"
+                settled_at: "2026-07-12T01:00:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer }
+        currency: { type: string }
+    Payout:
+      type: object
+      required: [payout_id, amount, status]
+      properties:
+        payout_id: { type: string }
+        merchant_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        status: { type: string, enum: [PENDING, COMPLETED, BREAK] }
+        settled_at: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "PAYOUT_NOT_FOUND"
+              message: "No payout run pay_run_01H8…."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

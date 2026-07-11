@@ -47,13 +47,23 @@ make render
 make render-preview
 make render-events
 
-step "[11/12] boot + seed (S-T7 demo-small via public APIs) + smoke"
+step "[11/13] boot + seed (S-T7 demo-small via public APIs) + smoke"
 make up
 make seed SCENARIO=demo-small
 make smoke
-
-step "[12/12] teardown"
 make down
+
+step "[12/13] shared E2E env (S-T8) — full topology (16+ slots) + checkout->delivery smoke"
+# Boot every catalog service + BFF + fake from deploy/e2e/topology.yaml, run the
+# mode-agnostic checkout->delivery smoke across the whole topology, tear down.
+# This is the stage the merge-webhook (ci/post-merge-smoke.sh) runs on every merge.
+make e2e-sync
+make e2e-up
+make e2e-smoke
+make e2e-down
+
+step "[13/13] teardown"
+make down || true
 
 echo
 echo "=== CI (local) GREEN — all gates passed; merge would be allowed ==="

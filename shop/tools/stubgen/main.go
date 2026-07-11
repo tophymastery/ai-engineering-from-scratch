@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,7 @@ func main() {
 	spec := flag.String("spec", "", "path to an OpenAPI YAML file")
 	port := flag.String("port", "9090", "port to serve the stub on")
 	printOnly := flag.Bool("print", false, "print the generated routes and exit (do not serve)")
+	idempotency := flag.Bool("idempotency", false, "replay-header behaviour: a repeat mutation with a seen Idempotency-Key gets Idempotency-Replayed: true (S-T8 topology default)")
 	flag.Parse()
 	if *spec == "" {
 		fmt.Fprintln(os.Stderr, "usage: stubgen -spec <openapi.yaml> [-port N] [-print]")
@@ -69,12 +71,42 @@ func main() {
 		return
 	}
 
+	// Idempotency-replay ledger: when -idempotency is set, a mutation carrying an
+	// Idempotency-Key that has been seen before is answered with the same status
+	// plus an Idempotency-Replayed: true header — the contract-level "replay a
+	// prior effect" signal every mutation obeys (02 §3). Stubs hold no real state,
+	// so this proves the replay HEADER path the E2E smoke asserts; the durable
+	// exactly-once effect lives in libs/idempotency once the real service merges.
+	var idemMu sync.Mutex
+	seenKeys := map[string]bool{}
+
 	mux := http.NewServeMux()
+
+	// Built-in health endpoint so e2e-up can healthcheck any stub uniformly. It is
+	// intentionally OUTSIDE the contract (health is /healthz, unversioned) — this
+	// is what lets stubgen boot 100% of the topology from /v1-only contracts.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Stub", title)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "service": title, "stub": true})
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		for _, rt := range routes {
 			if rt.method == r.Method && rt.re.MatchString(r.URL.Path) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("X-Stub", title)
+				if *idempotency && isMutation(r.Method) {
+					if key := r.Header.Get("Idempotency-Key"); key != "" {
+						idemMu.Lock()
+						replay := seenKeys[key]
+						seenKeys[key] = true
+						idemMu.Unlock()
+						if replay {
+							w.Header().Set("Idempotency-Replayed", "true")
+						}
+					}
+				}
 				w.WriteHeader(rt.status)
 				_ = json.NewEncoder(w).Encode(rt.body)
 				return
@@ -109,6 +141,16 @@ func loadSpec(path string) (map[string]any, error) {
 }
 
 var methods = []string{"get", "post", "patch", "delete", "put"}
+
+// isMutation reports whether a method is a state-changing verb that carries an
+// Idempotency-Key (02 §3): POST, PATCH, PUT, DELETE.
+func isMutation(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		return true
+	}
+	return false
+}
 
 func buildRoutes(doc map[string]any) ([]route, error) {
 	paths, ok := doc["paths"].(map[string]any)

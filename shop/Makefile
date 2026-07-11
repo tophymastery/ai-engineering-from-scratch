@@ -16,7 +16,8 @@ FAKES := payment-sim map-sim notify-sink
 
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
-        contract-validate pact-verify render-events dlqctl-demo
+        contract-validate pact-verify render-events dlqctl-demo \
+        e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -35,6 +36,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
 	@cd tools/stubgen && $(GO) build ./...
+	@cd tools/e2ectl && $(GO) build ./...
 	@cd tools/dlqctl && $(GO) build ./...
 	@cd tools/seedctl && $(GO) build ./...
 	@cd libs/eventbus/example && $(GO) build ./...
@@ -59,10 +61,43 @@ seed: ## Seed a golden dataset (SCENARIO=demo-small|lunch-rush) into the running
 smoke: ## Run the end-to-end smoke check against the booted stack
 	@tools/smoke.sh
 
+e2e-up: ## S-T8: boot the WHOLE shared E2E topology (12 services + 4 BFFs + 3 fakes + gateway) from deploy/e2e/topology.yaml + runtime overlay
+	@tools/e2e-up.sh
+
+e2e-down: ## S-T8: tear the shared E2E topology down (add --reset via: tools/e2e-down.sh --reset to clear swaps)
+	@tools/e2e-down.sh
+
+e2e-smoke: ## S-T8: checkout->delivery smoke across the full topology (mode-agnostic: stub/fake/real)
+	@tools/e2e-smoke.sh
+
+e2e-swap: ## S-T8: swap ONE slot stub->real in the runtime overlay + restart just it, measure wall-time (SVC=<service> [REALCMD="..."])
+	@tools/e2e-swap.sh $${SVC:?set SVC=<service>} $${REALCMD:+"$$REALCMD"}
+
+e2e-sync: ## S-T8 post-merge hook: detect slots whose real_cmd binary now EXISTS and swap them into the overlay (GitOps swap-in)
+	@set -e; \
+	  TOPO=deploy/e2e/topology.yaml; OV=.run/e2e-overlay.yaml; \
+	  ( cd tools/e2ectl && $(GO) build -o ../../.run/e2e/bin/e2ectl . ) 2>/dev/null || \
+	    ( mkdir -p .run/e2e/bin && cd tools/e2ectl && $(GO) build -o ../../.run/e2e/bin/e2ectl . ); \
+	  E=.run/e2e/bin/e2ectl; swapped=0; \
+	  while IFS=$$'\t' read -r name port mode contract real_cmd; do \
+	    [ -z "$$name" ] && continue; \
+	    if [ "$$mode" = real ]; then \
+	      "$$E" set-overlay "$$OV" "$$name" real "$$real_cmd"; \
+	      echo "e2e-sync: $$name real_cmd exists -> swapped to real ($$real_cmd)"; swapped=$$((swapped+1)); \
+	    fi; \
+	  done < <("$$E" sync "$$TOPO" "$$OV"); \
+	  echo "e2e-sync: $$swapped slot(s) with a merged real_cmd swapped in (overlay=$$OV)"
+
+post-merge-smoke: ## S-T8 merge-webhook target: e2e-sync + up + smoke + down; PAGE the merging team on red (SVC=<merged service>)
+	@ci/post-merge-smoke.sh $${SVC:-order}
+
 test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) + shared-lib + fakes + seedctl tests
 	@cd libs/testhooks && $(GO) vet ./... && $(GO) vet -tags testhooks ./...
 	@cd services/_placeholder && $(GO) vet ./...
 	@cd gateway && $(GO) vet ./...
+	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
+	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
+	@cd tools/e2ectl && $(GO) vet ./...
 	@$(MAKE) --no-print-directory test-libs
 	@$(MAKE) --no-print-directory test-fakes
 	@$(MAKE) --no-print-directory test-seed

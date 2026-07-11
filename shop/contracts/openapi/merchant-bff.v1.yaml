@@ -1,0 +1,81 @@
+# merchant-bff.v1 — client-shaped BFF contract (01 §2, 02 §4.2). Minimal S-T8
+# topology surface (+ runtime /healthz) so the E2E env boots a stub until the
+# merchant slices merge. BFFs aggregate; they never invent semantics. Conventions
+# (02 §1): /v1 paths, snake_case, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: merchant-bff
+  version: "1.0.0"
+  description: Merchant BFF — incoming-order queue + accept (01 §2). Minimal E2E stub — accept order.
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/merchant/orders/{order_id}:accept:
+    post:
+      operationId: accept_order
+      summary: Merchant accepts an incoming (PAID) order — saga step 3. :action verb.
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Order accepted (PAID -> ACCEPTED).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderAck" }
+              example:
+                order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                status: "ACCEPTED"
+                prep_eta_minutes: 18
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    OrderAck:
+      type: object
+      required: [order_id, status]
+      properties:
+        order_id: { type: string }
+        status: { type: string, enum: [ACCEPTED, REJECTED] }
+        prep_eta_minutes: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx (illegal state => 409)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "ORDER_INVALID_TRANSITION"
+              message: "Order ord_01H8… is not in PAID."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false
