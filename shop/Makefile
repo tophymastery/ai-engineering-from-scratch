@@ -8,7 +8,7 @@ OVERLAYS := dev preview staging prod
 # Shared libs (S-T3/S-T4/S-T7). Each is its own module; a libs/ change rebuilds
 # every importer (change-detection fan-out). testhooks is vetted with both tags
 # by the `test` target below.
-LIBS := errors otel logging flags idempotency testhooks
+LIBS := errors otel logging flags idempotency sharding testhooks
 
 .DEFAULT_GOAL := help
 
@@ -45,13 +45,15 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@$(MAKE) --no-print-directory test-libs
 	@tools/changed-paths_test.sh
 
-test-libs: ## Run the S-T3 shared-lib unit tests (errors, otel, logging, flags, idempotency)
-	@set -e; for l in errors otel logging flags idempotency; do \
+test-libs: ## Run the S-T3/S-T4 shared-lib unit tests (errors, otel, logging, flags, idempotency, sharding)
+	@set -e; for l in errors otel logging flags idempotency sharding; do \
 	  echo "== go test libs/$$l =="; \
 	  (cd libs/$$l && $(GO) test ./...); \
 	done
 	@echo "== flags: per-request override refused in prod / honoured in non-prod =="
 	@cd libs/flags && $(GO) test ./... && $(GO) test -tags testhooks ./...
+	@echo "== sharding: remap under write load is race-free (D6) =="
+	@cd libs/sharding && $(GO) test -race -run TestRemapUnderWriteLoad ./...
 	@echo "test-libs: all shared-lib tests passed"
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
