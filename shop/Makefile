@@ -8,13 +8,13 @@ OVERLAYS := dev preview staging prod
 # Shared libs (S-T3/S-T4/S-T7). Each is its own module; a libs/ change rebuilds
 # every importer (change-detection fan-out). testhooks is vetted with both tags
 # by the `test` target below.
-LIBS := errors otel logging flags idempotency sharding testhooks
+LIBS := errors otel logging flags idempotency sharding testhooks eventbus outbox inbox
 
 .DEFAULT_GOAL := help
 
 .PHONY: help up down seed smoke test test-libs render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
-        contract-validate pact-verify
+        contract-validate pact-verify render-events dlqctl-demo
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -32,6 +32,8 @@ build: ## Compile the shared libs + gateway + placeholder binaries (prod tags = 
 	@cd gateway && $(GO) build ./...
 	@cd contracts/registryctl && $(GO) build ./...
 	@cd tools/stubgen && $(GO) build ./...
+	@cd tools/dlqctl && $(GO) build ./...
+	@cd libs/eventbus/example && $(GO) build ./...
 	@echo "build ok"
 
 contract-validate: ## S-T5/D30 merge gate: OpenAPI conventions + event registry + dual-publish example + stubgen (+ asserted red fixture)
@@ -63,7 +65,28 @@ test-libs: ## Run the S-T3/S-T4 shared-lib unit tests (errors, otel, logging, fl
 	@cd libs/flags && $(GO) test ./... && $(GO) test -tags testhooks ./...
 	@echo "== sharding: remap under write load is race-free (D6) =="
 	@cd libs/sharding && $(GO) test -race -run TestRemapUnderWriteLoad ./...
+	@echo "== event backbone (S-T6/D8+D22): eventbus + outbox core race-checked =="
+	@cd libs/eventbus && $(GO) test -race ./...
+	@cd libs/outbox && $(GO) test -race ./...
+	@cd libs/inbox && $(GO) test ./...
+	@echo "== event backbone criteria: soak(>=10k/s, lag p99<2s, partition-drop) + 10x dedupe + poison->DLQ->replay =="
+	@cd libs/eventbus/example && $(GO) test -count=1 ./...
+	@echo "== dlqctl park/inspect/replay CLI =="
+	@cd tools/dlqctl && $(GO) test -count=1 ./...
 	@echo "test-libs: all shared-lib tests passed"
+
+render-events: ## S-T6: lint the CDC connector + event-backbone alert templates
+	@set -e; for f in deploy/cdc/debezium-connector.json deploy/alerts/event-backbone.yaml; do \
+	  ( cd tools/yamlcheck && $(GO) run . $$PWD/../../$$f ); \
+	done; echo "render-events: Debezium connector + relay-lag/DLQ-depth alerts parsed"
+
+dlqctl-demo: ## S-T6/D22: demo the DLQ park/inspect/replay CLI on a scratch DB
+	@set -e; d=$$(mktemp -d)/dlq.db; \
+	  ( cd tools/dlqctl && $(GO) run . -db $$d seed \
+	    && $(GO) run . -db $$d list -group projection \
+	    && $(GO) run . -db $$d inspect 1 \
+	    && $(GO) run . -db $$d replay 1 \
+	    && echo -n "depth after replay: " && $(GO) run . -db $$d depth -group projection )
 
 backdoor-scan: ## D29 layer 1: prod build has zero testhook symbols (+ red fixture)
 	@ci/backdoor-scan.sh
