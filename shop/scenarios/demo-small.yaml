@@ -1,0 +1,11 @@
+# demo-small — the smallest useful golden dataset (S-T7, 03 §3). Fast to seed;
+# used by demos and quick E2E smoke. Same seed => byte-identical dataset on rerun.
+seed: 7
+region: bkk
+merchants: {count: 3, menus_each: 5}
+customers: {count: 10}
+drivers:   {count: 4, online_ratio: 0.5}
+orders:
+  - {count: 5, state: DELIVERED}
+  - {count: 2, state: DISPATCHED}
+  - {count: 1, state: PAYMENT_PENDING}

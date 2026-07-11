@@ -1,0 +1,250 @@
+# payment-sim.v1 — the scriptable PSP fake adapter contract (S-T7, 03 §5).
+# This is the EXACT adapter contract the payment-sim fake serves and that the
+# payment slice's PSP adapter is written against. Conventions (02 §1): /v1 paths,
+# snake_case fields, integer minor-unit Money, RFC 3339 UTC _at fields, and the
+# 02 §2 error envelope on EVERY non-2xx (card-declined, timeout, unknown-auth).
+#
+# ADAPTATION NOTE: 02 §1 mandates a /v1 path major-version on every service, so
+# the canonical contract paths are /v1/psp/*. The fake ALSO serves the bare
+# task-spec aliases (/psp/authorize, …) for ergonomics; both route to the same
+# handler. The conformance test (services/fakes/payment-sim) verifies the fake
+# against the /v1 canonical paths documented here.
+openapi: 3.0.3
+info:
+  title: payment-sim
+  version: "1.0.0"
+  description: >
+    Scriptable PSP fake. Card number ending 0002 always declines
+    (PSP_CARD_DECLINED), ending 0044 times out (504 PSP_TIMEOUT), all else
+    authorizes. Async webhooks (payment.authorized/captured/refunded) fire in
+    deterministic order to a caller-supplied callback_url. Settlement CSV per
+    day. A seeded RNG makes auth ids, latencies, and webhook ids byte-identical
+    across reruns for the same seed.
+servers:
+  - url: http://payment-sim:8091
+paths:
+  /v1/psp/authorize:
+    post:
+      operationId: psp_authorize
+      summary: Authorize a card. 0002 declines, 0044 times out, else AUTHORIZED (+ async webhook).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AuthorizeRequest" }
+            example:
+              card_number: "4111111111111111"
+              amount: { amount: 42550, currency: "THB" }
+              order_ref: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+              callback_url: "http://notify-sink:8093/psp-webhook"
+      responses:
+        "200":
+          description: Card authorized.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Authorization" }
+              example:
+                auth_id: "psp_auth_0000000000000001"
+                status: "AUTHORIZED"
+                card_last4: "1111"
+                amount: { amount: 42550, currency: "THB" }
+                latency_ms: 137
+                authorized_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/psp/capture:
+    post:
+      operationId: psp_capture
+      summary: Capture a prior authorization (records it for the day's settlement file, + async webhook).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CaptureRequest" }
+            example:
+              auth_id: "psp_auth_0000000000000001"
+              amount: { amount: 42550, currency: "THB" }
+              settlement_date: "2026-07-11"
+              callback_url: "http://notify-sink:8093/psp-webhook"
+      responses:
+        "200":
+          description: Authorization captured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Capture" }
+              example:
+                capture_id: "psp_cap_0000000000000002"
+                auth_id: "psp_auth_0000000000000001"
+                status: "CAPTURED"
+                amount: { amount: 42550, currency: "THB" }
+                settlement_date: "2026-07-11"
+                captured_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/psp/refund:
+    post:
+      operationId: psp_refund
+      summary: Refund a prior capture (+ async webhook).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefundRequest" }
+            example:
+              capture_id: "psp_cap_0000000000000002"
+              amount: { amount: 42550, currency: "THB" }
+              callback_url: "http://notify-sink:8093/psp-webhook"
+      responses:
+        "200":
+          description: Capture refunded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+              example:
+                refund_id: "psp_ref_0000000000000003"
+                capture_id: "psp_cap_0000000000000002"
+                status: "REFUNDED"
+                amount: { amount: 42550, currency: "THB" }
+                refunded_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/psp/settlement-file:
+    get:
+      operationId: psp_settlement_file
+      summary: Deterministic CSV of the day's captures (sorted by capture_id).
+      parameters:
+        - name: date
+          in: query
+          required: true
+          description: Settlement day YYYY-MM-DD.
+          schema: { type: string, example: "2026-07-11" }
+      responses:
+        "200":
+          description: >
+            CSV settlement file. Columns:
+            capture_id,auth_id,amount_minor,currency,captured_at. Deterministic
+            order (sorted by capture_id); empty body (header only) for a day with
+            no captures.
+          content:
+            text/csv:
+              schema: { type: string }
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3). Honoured but optional on the fake.
+      schema: { type: string }
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, description: "Integer minor units (never floats)." }
+        currency: { type: string, description: "ISO 4217, e.g. THB." }
+    AuthorizeRequest:
+      type: object
+      required: [card_number, amount]
+      properties:
+        card_number: { type: string, description: "Ends 0002 => decline, 0044 => timeout, else authorize." }
+        amount: { $ref: "#/components/schemas/Money" }
+        order_ref: { type: string }
+        callback_url: { type: string, description: "Where the async payment.authorized webhook is POSTed." }
+    Authorization:
+      type: object
+      required: [auth_id, status, amount, authorized_at]
+      properties:
+        auth_id: { type: string }
+        status: { type: string, enum: [AUTHORIZED] }
+        card_last4: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        latency_ms: { type: integer, description: "Deterministic seeded processing latency." }
+        authorized_at: { type: string }
+    CaptureRequest:
+      type: object
+      required: [auth_id, amount]
+      properties:
+        auth_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        settlement_date: { type: string, description: "YYYY-MM-DD; groups the capture in that day's settlement file." }
+        callback_url: { type: string }
+    Capture:
+      type: object
+      required: [capture_id, auth_id, status, amount, settlement_date, captured_at]
+      properties:
+        capture_id: { type: string }
+        auth_id: { type: string }
+        status: { type: string, enum: [CAPTURED] }
+        amount: { $ref: "#/components/schemas/Money" }
+        settlement_date: { type: string }
+        captured_at: { type: string }
+    RefundRequest:
+      type: object
+      required: [capture_id, amount]
+      properties:
+        capture_id: { type: string }
+        amount: { $ref: "#/components/schemas/Money" }
+        callback_url: { type: string }
+    Refund:
+      type: object
+      required: [refund_id, capture_id, status, amount, refunded_at]
+      properties:
+        refund_id: { type: string }
+        capture_id: { type: string }
+        status: { type: string, enum: [REFUNDED] }
+        amount: { $ref: "#/components/schemas/Money" }
+        refunded_at: { type: string }
+    Webhook:
+      type: object
+      description: "Async event POSTed to callback_url; deterministic ordering by seq."
+      required: [event_id, event_type, occurred_at, seq]
+      properties:
+        event_id: { type: string }
+        event_type: { type: string, enum: [payment.authorized, payment.captured, payment.refunded] }
+        occurred_at: { type: string }
+        seq: { type: integer, description: "Monotonic per-server sequence — the deterministic ordering key." }
+        auth_id: { type: string }
+        capture_id: { type: string }
+        refund_id: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string, description: "PSP_CARD_DECLINED | PSP_TIMEOUT | PSP_UNKNOWN_AUTH | VALIDATION." }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on EVERY non-2xx (declines, timeouts, unknown auth)."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "PSP_CARD_DECLINED"
+              message: "Card ending 0002 was declined by the issuer."
+              details:
+                - { field: "card_number", reason: "card_declined" }
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

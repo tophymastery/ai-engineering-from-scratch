@@ -534,3 +534,78 @@ make test-libs                                             # all libs incl. S-T6
 5. **`dlqctl` drives a SQLite file** (`-db`) instead of a cell PG; `replay`
    re-inserts into the outbox in that DB so the running relay reprocesses it —
    the same code path production uses, minus the server.
+
+---
+
+# S-T7 Verification — Fake providers + factories + seedctl + golden datasets
+
+DevEx. All checks below were **run for real in this environment** (Docker
+daemon still absent → the process-mode boot from S-T1 is reused; every fake is a
+std-lib binary, so process mode runs the identical topology the compose file
+declares).
+
+## Environment realities
+
+- **Docker unavailable** → the three fakes are added to `docker-compose.yml`
+  (canonical, with a per-service `-healthcheck` probe) **and** to the process-mode
+  `tools/dev-up.sh`, which builds+runs the std-lib binaries and health-checks
+  them on :8091/:8092/:8093. `make up` now boots gateway + placeholder + 3 fakes;
+  `make down` reaps all five.
+- **Go** 1.24.7; `gopkg.in/yaml.v3` resolved from the warm module cache (already
+  vendored by `registryctl`/`yamlcheck`), so `seedctl` builds offline.
+- **TypeScript** mirror typechecks with the environment's `tsc` 6.0.2
+  (`tsc --noEmit` clean); documented to compile when BFF tooling arrives.
+
+## DoD / test-criteria matrix
+
+| # | S-T7 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | 3 fakes implement the **exact adapter contracts** and run in compose + E2E env | **full (adapted boot)** | `contracts/openapi/{payment-sim,map-sim,notify-sink}.v1.yaml` pass `contract-validate` (registryctl: **5 OpenAPI files OK**). Fakes boot in process-mode stack; `make smoke` **11/11** incl. behavioural checks of all three. Compose services + healthchecks added (render-only for the daemon). |
+| DoD-2 | payment-sim conforms to its contract (pact/verifier or conformance test) | **full** | `TestConformsToContract`: 4 `/v1` paths present in the contract file + served with the declared success shapes, error envelope, and `text/csv` settlement. |
+| DoD-3 | Every core entity has one factory; `make seed SCENARIO=lunch-rush` populates a stack via public APIs | **full** | `libs/factories`: `User/Merchant/MenuItem/Cart/Order/Driver`, one factory each (asserted). `make seed SCENARIO=lunch-rush` pushed **1145 aggregates** to the running placeholder `/kv` public API; a seeded order was read back through `GET /kv`. |
+| Test | payment-sim: `…0002` declines, `…0044` times out, webhooks fire — **100% deterministic across 50 seeded reruns** | **full** | `TestDeterministic50Reruns` (`-race`): decline=**402**, timeout=**504**, webhooks ordered `authorized→captured→refunded`; **50/50 runs byte-identical**. `TestDifferentSeedDiffers` guards the RNG is seed-driven. |
+| Test | Same seed + scenario ⇒ **byte-identical dataset on rerun** | **full** | `TestByteIdenticalOnRerun` (in-proc hash compare) **and** two separate `seedctl` CLI process runs: `lunch-rush` sha256 `30128634…dbbf5` on both; `demo-small` sha256 `0045176e…932d2`. |
+
+## What was built
+
+- **Fakes** (`services/fakes/{payment-sim,map-sim,notify-sink}`): std-lib Go,
+  own modules, Dockerfiles, `-healthcheck` flag. payment-sim: seeded RNG for
+  auth/capture/refund ids + latencies + webhook event ids; single FIFO webhook
+  dispatcher ⇒ deterministic ordering; deterministic clock (no wall time);
+  per-day settlement CSV sorted by `capture_id`.
+- **`libs/factories`** (Go) + **`bffs/factories-ts`** (TS mirror, `tsc`-clean):
+  typed builders, seeded RNG, deterministic shard-hint ULIDs that round-trip
+  through `libs/sharding`.
+- **`tools/seedctl`** (Go): YAML scenario → deterministic `Dataset` →
+  canonical JSON dump + pluggable `Sink` (today `KVSink` → `/kv` public API,
+  `NullSink` for dump-only).
+- **Golden datasets**: `scenarios/{demo-small,lunch-rush}.yaml` (03 §3 shape).
+- **Wiring**: `docker-compose.yml`, `tools/dev-up.sh`/`dev-down.sh`,
+  `tools/smoke.sh`, `Makefile` (`seed` real; `build`, `test`, new `test-fakes`
+  / `test-seed`), `ci/run-local.sh` stage 11 seeds `demo-small` end-to-end.
+
+## Deviations (adapted, not skipped)
+
+1. **`/v1` canonical paths + bare aliases.** 02 §1 forces a `/v1` major version
+   and `contract-validate` enforces it, but the task spells the paths bare
+   (`/psp/authorize`). Each fake serves **both**; contracts document the `/v1`
+   form and the conformance test verifies against it. (services/fakes/README.md)
+2. **seedctl sink = `/kv` today.** No slice service exists yet, so `KVSink`
+   targets the `_placeholder` `/kv` public API; `Sink` is an interface so real
+   per-entity endpoints plug in later with zero builder changes. (tools/seedctl/README.md)
+3. **TS mirror determinism is intra-language.** `bffs/factories-ts` is
+   byte-reproducible per seed in TS but not byte-identical to Go (the Go
+   `seedctl` is the single canonical generator); the shared contract is
+   shape+defaults, and the shard-hint hash mirrors `libs/sharding` exactly.
+4. **Compose = render-only for the fakes** (Docker daemon absent); process-mode
+   runs the identical observable topology.
+
+## Commands to reproduce
+
+```
+make test-fakes                    # factories + 3 fakes (payment-sim -race, 50-rerun determinism, conformance)
+make test-seed                     # seedctl byte-identity (in-proc + two CLI runs) + referential integrity
+make contract-validate             # 3 new adapter contracts pass the gate
+make up && make seed SCENARIO=lunch-rush && make smoke && make down   # end-to-end seed via public APIs
+./ci/run-local.sh                  # FULL 12-stage pipeline — exits 0
+```

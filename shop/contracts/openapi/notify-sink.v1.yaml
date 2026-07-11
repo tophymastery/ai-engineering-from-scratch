@@ -1,0 +1,160 @@
+# notify-sink.v1 — the queryable notification sink fake adapter contract (S-T7,
+# 03 §5). /send captures a push/sms/email payload into an in-memory inbox; tests
+# read it back via /inbox?recipient=… and assert what a user "received"; DELETE
+# /inbox clears between runs. Conventions (02 §1): /v1 paths, snake_case fields,
+# the 02 §2 error envelope on non-2xx. The fake also serves bare aliases
+# (/send, /inbox) per the task spec; both route to the /v1 handlers below.
+openapi: 3.0.3
+info:
+  title: notify-sink
+  version: "1.0.0"
+  description: >
+    Notification sink: captures push/SMS/email into a queryable in-memory inbox
+    so E2E tests assert delivery without sending anything. Insertion-ordered.
+servers:
+  - url: http://notify-sink:8093
+paths:
+  /v1/send:
+    post:
+      operationId: notify_send
+      summary: Capture a notification into the inbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendRequest" }
+            example:
+              channel: "PUSH"
+              recipient: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+              template: "order_delivered"
+              subject: "Your order arrived"
+              body: "Enjoy your meal!"
+      responses:
+        "200":
+          description: Notification captured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SendResult" }
+              example:
+                message_id: "msg_0000000000000001"
+                channel: "PUSH"
+                recipient: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                captured_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/inbox:
+    get:
+      operationId: notify_inbox
+      summary: Query captured messages, optionally filtered by recipient/channel.
+      parameters:
+        - { name: recipient, in: query, required: false, schema: { type: string } }
+        - { name: channel,   in: query, required: false, schema: { type: string, enum: [PUSH, SMS, EMAIL] } }
+      responses:
+        "200":
+          description: Captured messages (insertion order).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inbox" }
+              example:
+                count: 1
+                messages:
+                  - message_id: "msg_0000000000000001"
+                    channel: "PUSH"
+                    recipient: "usr_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                    template: "order_delivered"
+                    subject: "Your order arrived"
+                    body: "Enjoy your meal!"
+                    captured_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: notify_inbox_clear
+      summary: Clear the inbox (test isolation between runs).
+      parameters:
+        - { name: recipient, in: query, required: false, schema: { type: string, description: "Clear only this recipient; omit to clear all." } }
+      responses:
+        "200":
+          description: Inbox cleared.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClearResult" }
+              example:
+                cleared: 3
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  schemas:
+    SendRequest:
+      type: object
+      required: [channel, recipient]
+      properties:
+        channel: { type: string, enum: [PUSH, SMS, EMAIL] }
+        recipient: { type: string }
+        template: { type: string }
+        subject: { type: string }
+        body: { type: string }
+    SendResult:
+      type: object
+      required: [message_id, channel, recipient, captured_at]
+      properties:
+        message_id: { type: string }
+        channel: { type: string, enum: [PUSH, SMS, EMAIL] }
+        recipient: { type: string }
+        captured_at: { type: string }
+    Message:
+      type: object
+      required: [message_id, channel, recipient, captured_at]
+      properties:
+        message_id: { type: string }
+        channel: { type: string, enum: [PUSH, SMS, EMAIL] }
+        recipient: { type: string }
+        template: { type: string }
+        subject: { type: string }
+        body: { type: string }
+        captured_at: { type: string }
+    Inbox:
+      type: object
+      required: [count, messages]
+      properties:
+        count: { type: integer }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+    ClearResult:
+      type: object
+      required: [cleared]
+      properties:
+        cleared: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "VALIDATION"
+              message: "channel must be one of PUSH, SMS, EMAIL."
+              details:
+                - { field: "channel", reason: "invalid_enum" }
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false
