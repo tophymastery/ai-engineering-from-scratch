@@ -1,0 +1,65 @@
+# Per-PR preview overlay TEMPLATE (D29 / S-T2).
+#
+# Rendered per open PR by the Argo ApplicationSet (deploy/gitops/
+# preview-applicationset.yaml). Placeholders __PR__ / __SERVICE__ / __IMAGE__
+# are substituted from the PR's changed-paths set (tools/changed-paths.sh).
+#
+# ONLY the CHANGED services are deployed here. Requests carrying
+# X-Preview-Tenant: pr-__PR__ are routed to these pods; everything else falls
+# through to the shared baseline. This is the "deploy changed services only +
+# header routing over a shared baseline" pattern — no full stack per PR.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pr-__PR__-__SERVICE__
+  namespace: preview-shared
+  labels:
+    app: __SERVICE__
+    preview-role: pr-overlay
+    preview-tenant: pr-__PR__
+  annotations:
+    preview.shop.io/pr: "__PR__"
+    preview.shop.io/scale-to-zero-idle: "2h"    # per-PR pods idle-scale after 2h
+    preview.shop.io/ttl: "7d"                    # per-PR overlay reaped after 7 days
+    preview.shop.io/url: "https://pr-__PR__.preview.shop.io"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: __SERVICE__
+      preview-tenant: pr-__PR__
+  template:
+    metadata:
+      labels:
+        app: __SERVICE__
+        preview-role: pr-overlay
+        preview-tenant: pr-__PR__
+    spec:
+      containers:
+        - name: __SERVICE__
+          image: __IMAGE__
+          env:
+            - name: SERVICE_NAME
+              value: "__SERVICE__"
+---
+# Header-based route: X-Preview-Tenant: pr-__PR__ pins traffic to the PR overlay;
+# absent header ⇒ shared baseline. (Gateway-API HTTPRoute; Istio/Envoy equivalent
+# in real clusters.)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: pr-__PR__-route
+  namespace: preview-shared
+  annotations:
+    preview.shop.io/ttl: "7d"
+spec:
+  parentRefs:
+    - name: baseline-gateway
+  rules:
+    - matches:
+        - headers:
+            - name: X-Preview-Tenant
+              value: pr-__PR__
+      backendRefs:
+        - name: pr-__PR__-__SERVICE__
+          port: 8081
