@@ -148,5 +148,25 @@ curl -fsS -X POST "$SBASE/v1/index/merchants" -H 'Content-Type: application/json
 sub "verify customer-bff -> search pact (browse feed + geo search) — expect GREEN"
 "$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__search.json" "$SBASE"
 
+# --- V-T5: customer-bff -> ranking (re-rank contract), verified against the REAL
+# ranking service (ranking_ml on). The /v1/rank interaction is self-contained (no
+# search retrieval), so no SEARCH_URL wiring is needed here. ---
+RKPORT="${RANKING_PROVIDER_PORT:-18115}"
+RKBASE="http://localhost:$RKPORT"
+RK_PID=""
+rk_cleanup() { [ -n "$RK_PID" ] && kill "$RK_PID" 2>/dev/null || true; }
+trap 'cleanup; id_cleanup; p_cleanup; c_cleanup; s_cleanup; rk_cleanup' EXIT
+
+sub "build + boot ranking provider (V-T5) on $RKBASE (ranking_ml on)"
+( cd services/ranking && "$GO" build -o "$BIN/ranking" . )
+PORT="$RKPORT" SERVICE_NAME=ranking ENV=dev FLAG_RANKING_ML=true "$BIN/ranking" >"$BIN/ranking.log" 2>&1 &
+RK_PID=$!
+for _ in $(seq 1 40); do curl -fsS --max-time 1 "$RKBASE/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
+curl -fsS --max-time 2 "$RKBASE/healthz" >/dev/null || { echo "ranking never healthy"; cat "$BIN/ranking.log"; exit 1; }
+echo "ranking healthy"
+
+sub "verify customer-bff -> ranking pact (re-rank top-K) — expect GREEN"
+"$REG" pact-verify "$ROOT/contracts/pacts/customer-bff__ranking.json" "$RKBASE"
+
 echo
-echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog + search honour their pacts; broken pact correctly reds the build"
+echo "pact-verify: GREEN — placeholder + identity-auth + identity-profile + merchant-catalog + search + ranking honour their pacts; broken pact correctly reds the build"

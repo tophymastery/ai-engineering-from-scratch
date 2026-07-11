@@ -11,6 +11,7 @@ services:
   identity-profile:  { team: "Identity & Trust", slice: "V-T2"  }
   merchant-catalog:  { team: "Discovery",        slice: "V-T3"  }
   search:            { team: "Discovery",        slice: "V-T4"  }
+  ranking:           { team: "Discovery",        slice: "V-T5"  }
   cart:              { team: "Marketplace",      slice: "V-T7"  }
   order:             { team: "Marketplace",      slice: "V-T9"  }
   payment:           { team: "Payments",         slice: "V-T10" }

@@ -34,6 +34,12 @@ services:
   # (tools/search-realcmd.sh, search_v2 on; embeds the indexer). `make e2e-sync`
   # promotes it stub->real once the binary builds.
   - { name: search,            port: 8103, mode: stub, contract: contracts/openapi/search.v1.yaml,            real_cmd: "bash tools/search-realcmd.sh" }
+  # ranking is the V-T5 slice (D17 two-phase): real_cmd boots the built ranking
+  # binary (tools/ranking-realcmd.sh, ranking_ml on; retrieves top-500 from the
+  # search slot via SEARCH_URL, re-ranks to top-50). The gateway routes the browse
+  # BFF endpoint (/customer-bff/v1/customer/home) here. `make e2e-sync` promotes it
+  # stub->real once the binary builds.
+  - { name: ranking,           port: 8115, mode: stub, contract: contracts/openapi/ranking.v1.yaml,           real_cmd: "bash tools/ranking-realcmd.sh" }
   - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "" }
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }

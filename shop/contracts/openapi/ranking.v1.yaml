@@ -1,0 +1,201 @@
+# ranking.v1 — 01 §1 ranking (V-T5 implements D17 two-phase: retrieval top-500 in
+# search, ML re-rank to top-50 here). The customer browse feed
+# (GET /v1/customer/home) is served by ranking, which retrieves candidates from the
+# search browse contract and re-ranks them with an event-fed feature store. Gated by
+# the `ranking_ml` flag (ON = ML re-rank, OFF = static fallback = shed-ladder L1),
+# with auto-fallback on a model outage. Conventions (02 §1): /v1 paths, snake_case
+# fields, the 02 §2 error envelope on every non-2xx.
+openapi: 3.0.3
+info:
+  title: ranking
+  version: "1.0.0"
+  description: Re-ranking of the discovery browse feed (01 §1; V-T5 implements D17).
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/customer/home:
+    get:
+      operationId: browse_home_ranked
+      summary: Customer browse feed — search retrieval (top-500) re-ranked to the top-50 (02 §4.2).
+      description: >
+        The customer-bff browse endpoint (gateway passthrough). Retrieves nearby
+        OPEN stores from the search browse contract (top-500) and RE-RANKS them to
+        the top-50 with an event-fed feature store. `ranking_ml` ON selects the ML
+        re-rank; OFF (or an auto-fallback model outage) selects the static ranking
+        (retrieval order), which doubles as shed-ladder L1 (D12).
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, example: 13.7563 } }
+        - { name: lng, in: query, required: true, schema: { type: number, example: 100.5018 } }
+      responses:
+        "200":
+          description: Re-ranked browse feed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HomeFeed" }
+              example:
+                location: { lat: 13.7563, lng: 100.5018 }
+                feed:
+                  - { store_id: "mer_01H8XGABCDE", name: "Som Tam House", rating: 4.7, distance_m: 820, open: true, delivery_fee: { amount: 1500, currency: "THB" }, eta_minutes: 15 }
+                ranking: { scorer: "ml", ml_requested: true, fallback_engaged: false }
+                next_cursor: null
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/rank:
+    post:
+      operationId: rerank_candidates
+      summary: Re-rank a supplied candidate set to the top-K.
+      description: >
+        Re-ranks a caller-supplied retrieval set (the search top-500) to the top-K
+        (default 50). Self-contained (no retrieval dependency) — the core ranking
+        contract. Uses the ML scorer when `ranking_ml` is on and the model is
+        healthy, else the static fallback.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RankRequest" }
+      responses:
+        "200":
+          description: Re-ranked results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RankResponse" }
+              example:
+                results:
+                  - { store_id: "mer_01H8XGABCDE", name: "Som Tam House", rating: 4.7, distance_m: 820, open: true }
+                scorer: "ml"
+                fallback_engaged: false
+                count: 1
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/signals/events:
+    post:
+      operationId: ingest_ranking_signal
+      summary: Ingest a ranking.signal event onto the feature-store bus (impression/click/order).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: "A 02 §4.3 event envelope carrying a ranking.signal payload." }
+      responses:
+        "202": { description: Accepted for feature-store projection. }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/rank/stats:
+    get:
+      operationId: ranking_stats
+      summary: Ranking telemetry — active scorer, auto-fallback state, feature counts, re-rank p99.
+      responses:
+        "200":
+          description: Stats snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stats" }
+        default: { $ref: "#/components/responses/Error" }
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, description: "integer minor units (02 §1 Money)." }
+        currency: { type: string, example: "THB" }
+    Candidate:
+      type: object
+      required: [store_id, name, open]
+      properties:
+        store_id: { type: string }
+        name: { type: string }
+        rating: { type: number }
+        distance_m: { type: integer }
+        open: { type: boolean }
+        delivery_fee: { $ref: "#/components/schemas/Money" }
+        eta_minutes: { type: integer }
+    RankingMeta:
+      type: object
+      required: [scorer]
+      properties:
+        scorer: { type: string, description: "which scorer produced the order: ml | static.", example: "ml" }
+        ml_requested: { type: boolean, description: "the ranking_ml flag value for this request." }
+        fallback_engaged: { type: boolean, description: "auto-fallback breaker open (model outage)." }
+    HomeFeed:
+      type: object
+      required: [location, feed]
+      properties:
+        location:
+          type: object
+          required: [lat, lng]
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+        feed:
+          type: array
+          items: { $ref: "#/components/schemas/Candidate" }
+        ranking: { $ref: "#/components/schemas/RankingMeta" }
+        next_cursor:
+          type: [string, "null"]
+          description: "Cursor pagination (02 §1) — null at end."
+    RankRequest:
+      type: object
+      required: [candidates]
+      properties:
+        location:
+          type: object
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+        candidates:
+          type: array
+          items: { $ref: "#/components/schemas/Candidate" }
+        top_k: { type: integer, description: "output size (default 50)." }
+    RankResponse:
+      type: object
+      required: [results, scorer, count]
+      properties:
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/Candidate" }
+        scorer: { type: string, example: "ml" }
+        fallback_engaged: { type: boolean }
+        count: { type: integer }
+    Stats:
+      type: object
+      properties:
+        served: { type: integer }
+        served_ml: { type: integer }
+        served_static: { type: integer }
+        ml_errors: { type: integer }
+        feature_merchants: { type: integer }
+        fallback_engaged: { type: boolean }
+        active_scorer: { type: string }
+        rerank_p99: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "RANKING_RETRIEVAL_FAILED"
+              message: "Candidate retrieval from search failed."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: true

@@ -246,10 +246,12 @@ else
 fi
 
 # --- 14. V-T4 search & browse (D17/D11) — GATED on the search slot being REAL
-# (the stub can't index/route). Demoed THROUGH the customer-bff browse passthrough
-# (gateway routes /customer-bff/v1/customer/home + /v1/search -> search-query,
-# behind search_v2). Proves: browse feed, geo search, and freshness (event ->
-# queryable) via the real in-process index. ---
+# (the stub can't index/route). Demoed THROUGH the customer-bff browse passthrough.
+# When the V-T5 ranking slot is real the browse feed (/customer-bff/v1/customer/home)
+# flows customer-bff -> ranking (re-rank) -> search (retrieval); geo search
+# (/v1/search) stays on search-query. These assertions are shape/content assertions
+# the re-rank preserves, so they hold either way. Proves: browse feed, geo search,
+# and freshness (event -> queryable) via the real in-process index. ---
 echo "== V-T4 search & browse (seed -> browse feed -> geo search -> freshness, via customer-bff) =="
 SEARCH_MODE="$(awk -F'\t' '$1=="search"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
 if [ "$SEARCH_MODE" != "real" ]; then
@@ -291,6 +293,62 @@ else
   else
     bad "event not queryable within 30s (freshness FAILED)"
   fi
+fi
+
+# --- 15. V-T5 ranking (D17 two-phase re-rank) — GATED on the ranking AND search
+# slots being REAL (ranking re-ranks the search top-500 -> top-50; it retrieves
+# candidates from the real search slot). Demoed THROUGH the customer-bff browse
+# passthrough (gateway routes /customer-bff/v1/customer/home -> ranking). Proves
+# BOTH flag states via the browse endpoint: ranking_ml ON => ML re-rank (an
+# event-popular store is promoted above a higher-rated one); ranking_ml OFF (the
+# static-ranking fallback, = shed-ladder L1) => retrieval order (higher rating
+# first). The feed DIFFERS between the two states. ---
+echo "== V-T5 ranking (seed -> event-fed features -> ML re-rank ON vs static OFF, via customer-bff) =="
+RANKING_MODE="$(awk -F'\t' '$1=="ranking"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+SEARCH_MODE_R="$(awk -F'\t' '$1=="search"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$RANKING_MODE" != "real" ] || [ "$SEARCH_MODE_R" != "real" ]; then
+  echo "  SKIP: ranking='$RANKING_MODE' search='$SEARCH_MODE_R' — V-T5 runs only when BOTH ranking and search are the real slots"
+else
+  # A distinct browse point (far from section 14's stores, outside the 5km radius)
+  # so the re-rank order is deterministic over exactly the two seeded stores.
+  RLAT=13.9000; RLNG=100.6000
+  HI="mer_e2e_rank_hi_$$"    # higher-rated, no popularity  -> static winner
+  POP="mer_e2e_rank_pop_$$"  # lower-rated, event-popular   -> ML winner
+  curl -s -o /dev/null -X POST "$GW/search/v1/index/merchants" -H 'Content-Type: application/json' \
+    -d '{"merchant_id":"'"$HI"'","name":"E2E HiRated","lat":'"$RLAT"',"lng":'"$RLNG"',"open":true,"rating":4.8,"menu_version":1,"items":[{"item_id":"i","name":"Som Tam","amount":8000,"currency":"THB","available":true}]}'
+  curl -s -o /dev/null -X POST "$GW/search/v1/index/merchants" -H 'Content-Type: application/json' \
+    -d '{"merchant_id":"'"$POP"'","name":"E2E Popular","lat":'"$RLAT"',"lng":'"$RLNG"',"open":true,"rating":4.2,"menu_version":1,"items":[{"item_id":"i","name":"Som Tam","amount":8000,"currency":"THB","available":true}]}'
+
+  # Event-fed feature store: stream ORDER signals for the popular store into ranking.
+  for i in $(seq 1 20); do
+    curl -s -o /dev/null -X POST "$GW/ranking/v1/signals/events" -H 'Content-Type: application/json' \
+      -d '{"event_id":"evt_e2e_rank_'"$$"'_'"$i"'","event_type":"ranking.signal","occurred_at":"2026-01-01T00:00:00Z","trace_id":"t_e2e","aggregate":{"type":"merchant","id":"'"$POP"'","region":"bkk"},"schema_version":1,"payload":{"merchant_id":"'"$POP"'","signal_type":"order","weight":1}}'
+  done
+  sleep 0.3  # allow async signal delivery into the feature store
+
+  parse_top() { sed -n 's/.*"feed":\[{"store_id":"\([^"]*\)".*/\1/p'; }
+
+  # ranking_ml ON (default env FLAG_RANKING_ML=true): ML re-rank promotes POP.
+  ON_BODY="$(curl -s --max-time 8 "$GW/customer-bff/v1/customer/home?lat=$RLAT&lng=$RLNG" 2>/dev/null)"
+  TOP_ON="$(printf '%s' "$ON_BODY" | parse_top)"
+  if [[ "$ON_BODY" == *'"scorer":"ml"'* ]]; then pass "browse ranking_ml ON uses the ML scorer"; else bad "ranking_ml ON: expected scorer=ml (${ON_BODY:0:160})"; fi
+  if [ "$TOP_ON" = "$POP" ]; then pass "ML re-rank promotes the event-popular store to the top ($POP)"; else bad "ML re-rank top=$TOP_ON, want popular $POP"; fi
+
+  # ranking_ml OFF via X-Flag-Override (non-prod testhooks build): static fallback
+  # (= shed-ladder L1) => retrieval order, higher-rated HI first.
+  OFF_BODY="$(curl -s --max-time 8 -H 'X-Flag-Override: ranking_ml=false' "$GW/customer-bff/v1/customer/home?lat=$RLAT&lng=$RLNG" 2>/dev/null)"
+  TOP_OFF="$(printf '%s' "$OFF_BODY" | parse_top)"
+  if [[ "$OFF_BODY" == *'"scorer":"static"'* ]]; then pass "browse ranking_ml OFF uses the static fallback (shed L1)"; else bad "ranking_ml OFF: expected scorer=static (${OFF_BODY:0:160})"; fi
+  if [ "$TOP_OFF" = "$HI" ]; then pass "static fallback keeps retrieval order (higher-rated $HI first)"; else bad "static top=$TOP_OFF, want higher-rated $HI"; fi
+
+  # Headline: the feed DIFFERS between the two flag states.
+  if [ -n "$TOP_ON" ] && [ "$TOP_ON" != "$TOP_OFF" ]; then pass "feed differs between ranking_ml ON ($TOP_ON) and OFF ($TOP_OFF)"; else bad "feed did not differ between flag states (on=$TOP_ON off=$TOP_OFF)"; fi
+
+  # The re-ranked feed preserves the full browse shape (fee + rating carried through).
+  assert_body "re-ranked feed carries the delivery fee" GET "/customer-bff/v1/customer/home?lat=$RLAT&lng=$RLNG" '"delivery_fee"'
+
+  # Ranking is healthy and NOT in auto-fallback (breaker closed) during the demo.
+  assert_body "ranking reports the model healthy (no auto-fallback)" GET "/ranking/v1/rank/stats" '"fallback_engaged":false'
 fi
 
 echo "----"

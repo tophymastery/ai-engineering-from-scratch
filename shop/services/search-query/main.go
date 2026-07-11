@@ -204,7 +204,19 @@ func (s *queryServer) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	// rating from the rating service; both are contract stubs in E2E, so the fee is
 	// derived deterministically from distance here (disclosed) while rating comes
 	// from the indexed rating.updated projection.
-	hits := s.node.Engine.Search(index.Query{Lat: lat, Lng: lng, OpenB: true, Limit: 30})
+	// limit is an ADDITIVE query param (D30): the V-T5 ranking service retrieves the
+	// top-500 candidate set from this browse feed (limit=500) and re-ranks to top-50.
+	// Default 30 (unchanged customer default); capped at 500 (D17 retrieval size).
+	limit := 30
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	hits := s.node.Engine.Search(index.Query{Lat: lat, Lng: lng, OpenB: true, Limit: limit})
 	feed := make([]feedItem, 0, len(hits))
 	for _, h := range hits {
 		feed = append(feed, feedItem{
