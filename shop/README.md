@@ -17,7 +17,7 @@ Kafka · PostgreSQL · Redis · GitOps (Argo CD) · OpenTelemetry.
 | [docs/03-testing.md](docs/03-testing.md) | Test pyramid, spawn-the-system tooling, test-data generation, isolation/repeatability, env control |
 | [docs/04-operations.md](docs/04-operations.md) | CI/CD pipeline & progressive delivery, observability, standardized cluster-traceable logging |
 | [docs/05-scale-100m.md](docs/05-scale-100m.md) | 100M-user scale-up: reconciled decision log (D1–D30), cell topology, capacity model v2, DR, cost, org |
-| [TASKS.md](TASKS.md) | Implementation roadmap: 10 phases, 63 tasks with Definition of Done + test criteria |
+| [TASKS.md](TASKS.md) | Implementation roadmap: 1 ordered setup phase + 37 parallel fullstack slices (45 tasks) with Definition of Done + test criteria |
 
 ## System context
 

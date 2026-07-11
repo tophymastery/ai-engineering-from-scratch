@@ -1,942 +1,694 @@
-# TASKS — 100M-User Scale-Up Roadmap
+# TASKS — 100M-User Platform Roadmap (Setup + Parallel Fullstack Slices)
 
-Implements the decisions **D1–D30** in [docs/05-scale-100m.md](docs/05-scale-100m.md).
-Teams are the ownership map of D28. Every task is completable by one team in
-≤ 2 weeks; anything larger was split at authoring time.
+Implements decisions **D1–D30** in [docs/05-scale-100m.md](docs/05-scale-100m.md)
+and the base blueprint (docs 01–04). Structure: **one ordered SETUP phase
+(S-T1…S-T8)**, then **37 vertical slices (V-T1…V-T37) that all run in
+parallel** — every non-setup task depends only on S-tasks (or nothing), never
+on another slice.
 
-**Sequencing:** P0–P1 run first and strictly ordered (P1 fixes live correctness
-bugs — C3/C4/C10/C20/C21/C23). P2–P6 run largely in parallel by owning team,
-respecting per-task `Depends on`. P7 needs P5; P8 needs P1/P3/P4; P9 is
-continuous but formalized last.
+## Parallel execution rules
 
-**Per-task template (normative):**
+- **Contracts, not code, are the integration surface.** Every slice publishes
+  its OpenAPI spec, event schemas, and Pact pacts to the registry/broker
+  (S-T5) *before* implementation. Other slices build against those published
+  contracts — never against another slice's running code or repo internals.
+- **Fakes stand in for every neighbor.** The setup fakes (payment-sim,
+  map-sim, notify-sink — S-T7) plus contract-generated service stubs mean no
+  slice ever waits on another slice's implementation. Saga-adjacent slices
+  (order / payment / dispatch) develop against each other's published
+  contracts + fakes and integrate **continuously in the shared E2E env**
+  (S-T8), where whichever real implementations exist replace their stubs
+  automatically.
+- **Contract changes go through the registry, not through cross-team
+  blocking:** additive-only within a topic/version; shape changes are a new
+  topic/version with a dual-publish window and enforced deprecation date
+  (D30). A slice needing a contract change PRs the contract; CI (Pact +
+  registry rules) informs every affected slice — no meetings on the critical
+  path.
+- **Every slice ships flag-gated**, so merge order is irrelevant: any subset
+  of completed slices yields a working system with the rest stubbed by fakes.
+
+## Per-task template (normative)
 
 ```markdown
-### <PHASE>-T<N>: <Title>
+### <ID>: <Title>
 - **Team:** <one team from D28>
-- **Decisions implemented:** D<x>[, D<y>]
-- **Depends on:** <task IDs | none>
+- **Decisions implemented:** D<x>[, D<y>] | none (base blueprint)
+- **Depends on:** <S-task IDs | none>
 - **Scope:** 2-4 sentences; what is in and explicitly what is out.
-- **Definition of Done:** bullets, each independently checkable by someone
-  outside the team (merged, deployed-to-env, flag state, dashboard/runbook
-  live, ownership.yaml entry, doc updated).
-- **Test criteria:** the automated assertions gating the task, with numeric
-  pass thresholds; load/chaos criteria cite the capacity model (D24) at 1.5x.
+- **Definition of Done:** bullets, each independently checkable; every slice
+  includes "demo-able end-to-end via its BFF endpoint(s) against fakes in the
+  shared E2E env".
+- **Test criteria:** automated assertions with numeric pass thresholds; load
+  criteria cite the capacity model (D24) at 1.5x.
 - **Effort:** <= 2 weeks.
 ```
 
-Conventions applied to every task: load thresholds come from the capacity
-model v2 (05 §4) at 1.5×; every money-path chaos criterion asserts **zero
-duplicate charges, zero lost orders**; every new service's DoD includes SLO +
-dashboard + runbook + `ownership.yaml` entry.
+Conventions: every slice delivers the full vertical — BFF endpoint(s) →
+service(s) → DB/migrations → events → tests at all four levels
+(unit/contract/integration/E2E) → dashboards + alerts → deployed behind a
+feature flag. Money-path chaos criteria always assert **zero duplicate
+charges, zero lost orders**. Every new service's DoD includes SLO + runbook +
+`ownership.yaml` entry.
 
 ---
 
-## Phase 0 — Foundations & proof of scale
+## Phase S — SETUP (ordered; the only sequential work)
 
-### P0-T1: Capacity model as a CI artifact
-- **Team:** SRE/Observability
-- **Decisions implemented:** D24
+### S-T1: Monorepo scaffold + K8s/compose baseline
+- **Team:** DevEx
+- **Decisions implemented:** none (base blueprint, 04 §1.1)
 - **Depends on:** none
-- **Scope:** Convert the 05 §4 table into a machine-readable `capacity-model.yaml` checked into the repo with a derivation doc; add a CI job that diffs the latest perf-cell results against it. Out of scope: the perf cell itself (P0-T4).
+- **Scope:** Monorepo layout (services/, bffs/, libs/, contracts/, deploy/, scenarios/, tools/), Kustomize base + overlays, one generated compose file, `make up/seed/smoke` skeletons, path-based change detection. Out: any business service.
 - **Definition of Done:**
-  - `capacity-model.yaml` in repo covering every 05 §4 dimension, versioned.
-  - CI job on `main` compares newest archived load results to the model and fails on regression.
-  - Derivation doc reviewed by Marketplace, Location, Payments leads.
-  - `ownership.yaml` entry: SRE/Observability owns the model.
+  - `make up` boots an empty-but-healthy stack (gateway + placeholder service) locally.
+  - Kustomize base/overlays render for dev/preview/staging/prod; hello-world deploys to a cluster.
+  - Change-detection builds only affected paths (verified on a fixture PR).
 - **Test criteria:**
-  - Fixture load-result 10% below model ⇒ CI job red; baseline fixture ⇒ green.
-  - Schema validation: model file rejects an unknown/missing dimension.
+  - Fresh-clone `make up` to healthy in < 10 min on a dev machine.
+  - CI scaffold job green on the fixture PR; unaffected paths skipped 100%.
 - **Effort:** 1 week.
 
-### P0-T2: Spatially skewed golden datasets + k6 harness
+### S-T2: CI pipeline + shared multi-tenant preview envs + prod-safety gates
 - **Team:** DevEx
-- **Decisions implemented:** D24
-- **Depends on:** P0-T1
-- **Scope:** Build `load-peak-city` (single-city ×8 skew, celebrity-merchant hot spots) and `load-500k-drivers` golden datasets, plus a k6 harness that drives 1.5× model numbers against any `BASE_URL`. Replaces `load-10k` as the largest scenario.
+- **Decisions implemented:** D29
+- **Depends on:** S-T1
+- **Scope:** Full PR pipeline (lint → unit → contract → build/sign → integration → preview E2E → security scan), GitOps delivery with canary/rollback, shared multi-tenant preview infra (per-PR deploy of changed services + header routing over a shared baseline, scale-to-zero 2 h, TTL 7 d), and prod-safety: test backdoors (`X-Test-Clock`/`X-Flag-Override`) compiled out of prod builds, stripped at gateway, alarmed in prod logs.
 - **Definition of Done:**
-  - Both datasets versioned in `scenarios/`, generated via `seedctl` (seeded, repeatable).
-  - Harness in `tools/` with per-dimension target knobs read from `capacity-model.yaml`.
-  - Nightly perf-cell invocation documented and scheduled (activates with P0-T4).
+  - Pipeline green end-to-end on a reference PR; merge blocked on any red gate.
+  - Shared preview live; per-PR URL posted; no full-stack-per-PR pattern created.
+  - Backdoor symbol scan in CI; gateway strip rule + prod-log alert deployed.
 - **Test criteria:**
-  - Harness sustains 1.5× largest-cell edge RPS (90k) for 30 min with generator-side error < 0.01%.
-  - Dataset skew assertion: top H3 zone receives ≥ 30% of orders; top merchant ≥ 5%.
+  - Preview cost/PR ≤ 20% of a full-stack estimate; cross-PR isolation: two PRs mutating the same entity type show zero data bleed.
+  - Prod-tagged fixture image containing a backdoor handler ⇒ CI red; header sent to prod-mode env ⇒ stripped + alert < 1 min.
 - **Effort:** 2 weeks.
 
-### P0-T3: 500k-stream driver-fleet simulator
-- **Team:** Location
-- **Decisions implemented:** D24
-- **Depends on:** P0-T2
-- **Scope:** Simulator holding 500k concurrent gRPC streams with adaptive sampling profiles (1 Hz on-job / 0.1 Hz idle), scripted reconnect storms, spatial movement models. Runs from the perf cell.
-- **Definition of Done:**
-  - Simulator merged in `tools/`, profile-driven, horizontally scalable.
-  - Wired into the `load-500k-drivers` scenario and the nightly perf run.
-  - Runbook for operating it during chaos drills.
-- **Test criteria:**
-  - Sustains 300k msg/s for 1 h with < 0.1% stream drops (simulator-side).
-  - Reconnect-storm mode: 100k disconnects issued within 60 s, all re-established < 60 s.
-- **Effort:** 2 weeks.
-
-### P0-T4: Standing prod-scale perf cell
-- **Team:** Compute/Delivery
-- **Decisions implemented:** D24
-- **Depends on:** P0-T1
-- **Scope:** Stand up a production-sized cell (full stack, prod-shape data volumes, no prod data) used for monthly load runs, weekly chaos (P8-T5), and shadow traffic (P9-T5). Includes cost controls (scale-down between runs).
-- **Definition of Done:**
-  - Perf cell deployed from the same IaC as prod cells.
-  - Monthly scheduled run executes `load-peak-city` and archives results where P0-T1's CI job reads them.
-  - Cost note: idle-state spend and per-run spend published.
-- **Test criteria:**
-  - First full run measures every `capacity-model.yaml` dimension at 1.5× and archives them.
-  - Scale-down verified: idle cost ≤ 20% of run cost.
-- **Effort:** 2 weeks.
-
-### P0-T5: `libs/sharding` + shard-hint ULIDs
-- **Team:** Storage/DB
-- **Decisions implemented:** D6
-- **Depends on:** none
-- **Scope:** Routing library (Go): 256 logical shards → physical cluster map, shard-hint ULID codec (2 hex chars after prefix), remap tool skeleton; reference integration in a sandbox service. Out of scope: migrating real services (P3).
-- **Definition of Done:**
-  - Library merged with docs; sandbox service uses it end-to-end.
-  - Remap tool moves one logical shard between clusters in sandbox.
-  - Shard map is config-driven (per-cell overlay), hot-reloadable.
-- **Test criteria:**
-  - 1M-key routing distribution within 1% of uniform (chi-square).
-  - Shard-hint decode agrees with hash routing on 100% of 1M generated IDs.
-  - Remap under sandbox write load: zero misroutes, zero write errors.
-- **Effort:** 2 weeks.
-
-## Phase 1 — Correctness hotfixes (live bugs; before any scale-out)
-
-### P1-T1: Idempotency rewrite — durable dedupe in the business transaction
+### S-T3: Shared libs — errors, logging/otel, flags, idempotency (PG-durable)
 - **Team:** Storage/DB
 - **Decisions implemented:** D9
-- **Depends on:** none
-- **Scope:** Rewrite `libs/idempotency`: dedupe = `UNIQUE(idempotency_key)` insert in the caller's own PG transaction (with the business write + outbox row); Redis demoted to read-through response cache + IN_FLIGHT advisory. Wire protocol of 02 §3 (headers, replay semantics) unchanged.
+- **Depends on:** S-T1
+- **Scope:** `libs/errors` (code registry), `libs/logging` (04 §3 envelope + per-route sampling classes), `libs/otel`, `libs/flags`, and `libs/idempotency` per D9: dedupe = `UNIQUE(idempotency_key)` insert in the caller's own PG transaction; Redis as read-through cache + IN_FLIGHT advisory only. Wire protocol of 02 §3 unchanged.
 - **Definition of Done:**
-  - Library merged; migration helper for adopting services shipped.
-  - `Idempotency-Replayed`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS` semantics preserved (contract tests).
-  - Docs updated: 05 D9 noted as superseding 02 §3 storage.
+  - All five libs merged with docs and a reference service exercising each.
+  - Log-schema test validates the envelope; flag override works per-request in non-prod.
+  - Idempotency migration helper shipped for adopting slices.
 - **Test criteria:**
-  - 100 concurrent same-key requests ⇒ exactly 1 effect, 99 replays.
-  - Redis killed mid-storm ⇒ still exactly 1 effect; p99 penalty of cold cache < +20 ms.
+  - 100 concurrent same-key requests ⇒ exactly 1 effect, 99 replays; Redis killed mid-storm ⇒ still exactly 1 effect; cold-cache p99 penalty < +20 ms.
   - Same key + different body ⇒ 409 on 100% of attempts.
 - **Effort:** 2 weeks.
 
-### P1-T2: Money-path adoption + Redis-loss chaos gate
-- **Team:** Payments
-- **Decisions implemented:** D9
-- **Depends on:** P1-T1
-- **Scope:** Adopt the rewritten library in order checkout, payment authorize/capture/refund, and settlement payouts; delete the Redis-primary path; add the Redis-failover chaos scenario to the recurring suite.
+### S-T4: `libs/sharding` + shard-hint ULIDs
+- **Team:** Storage/DB
+- **Decisions implemented:** D6
+- **Depends on:** S-T1
+- **Scope:** Routing library: 256 logical shards → physical map (config-driven, hot-reloadable), shard-hint ULID codec (2 hex chars after prefix), online remap tool; sandbox reference integration. Out: migrating real services (V-T26/V-T27).
 - **Definition of Done:**
-  - Three services migrated and deployed to staging + one prod cell.
-  - Old Redis-primary code removed from all three.
-  - Chaos scenario merged into the weekly suite (feeds P8-T5); runbook updated.
+  - Library + remap tool merged with docs; sandbox service routes end-to-end.
+  - Remap moves a logical shard under sandbox write load.
 - **Test criteria:**
-  - Forced Redis failover during a 1.5× checkout storm ⇒ zero duplicate charges (ledger scan), zero lost orders.
-  - Duplicate-effect metric exists and reads 0 over a 7-day staging soak.
+  - 1M-key distribution within 1% of uniform (chi-square); shard-hint decode agrees with hash routing on 100% of 1M IDs.
+  - Sandbox remap: zero misroutes, zero write errors.
 - **Effort:** 2 weeks.
 
-### P1-T3: Debezium CDC outbox; pollers deleted
-- **Team:** Data Platform
-- **Decisions implemented:** D8
-- **Depends on:** none
-- **Scope:** Debezium log-based CDC connectors for every service's outbox table; delete in-service pollers; time-partition outbox tables with partition-drop cleanup.
-- **Definition of Done:**
-  - All 12 services publishing via CDC; poller code removed.
-  - Partition-drop job scheduled; connector configs in `deploy/`.
-  - Relay-lag dashboard + alert per service.
-- **Test criteria:**
-  - 10k events/s soak for 2 h ⇒ relay lag p99 < 2 s, zero autovacuum alerts.
-  - Partition drop reclaims space with zero relay errors or event loss (offset audit).
-- **Effort:** 2 weeks.
-
-### P1-T4: Inbox time-partitioning + skip-inbox rule
-- **Team:** Data Platform
-- **Decisions implemented:** D8
-- **Depends on:** none
-- **Scope:** Daily-partitioned consumer-inbox tables with 7-day partition drop; audit all consumers and document + apply the skip-inbox rule for naturally idempotent handlers.
-- **Definition of Done:**
-  - Shared inbox library partitioned; drops automated.
-  - Per-consumer inbox/skip decision recorded in `contracts/`.
-  - Notification and search projections (highest volume) migrated first.
-- **Test criteria:**
-  - 10× duplicate-delivery replay burst ⇒ zero duplicate side effects across all consumers.
-  - 14-day soak: inbox storage plateaus at ≤ 7 days of volume.
-- **Effort:** 2 weeks.
-
-### P1-T5: Durable saga timers + auto-remediation + bulk compensation
-- **Team:** Marketplace
-- **Decisions implemented:** D22
-- **Depends on:** none
-- **Scope:** Timer table in the order DB fired by a leased HA sweeper (replaces in-memory timers for `T_accept`, `T_dispatch`, capture-by); auto-remediation of known-safe stuck states (PAYMENT_PENDING > 15 min ⇒ void + cancel); bulk-compensation APIs + console in admin-bff.
-- **Definition of Done:**
-  - All saga timeouts migrated to durable timers; sweeper leases verified HA.
-  - Remediation rules flag-gated and enabled in staging + one prod cell.
-  - Bulk-compensation console live; stuck-order SLO dashboard (< 0.05%/day) + alert.
-- **Test criteria:**
-  - Kill all order pods with 1k pending timers ⇒ 100% fire within 60 s of due time.
-  - Remediation fixture: stuck PAYMENT_PENDING auto-voids in < 16 min, exactly once.
-  - 7-day staging soak: stuck-order rate < 0.05% of orders.
-- **Effort:** 2 weeks.
-
-### P1-T6: DLQ framework + park/inspect/replay CLI
-- **Team:** Data Platform
-- **Decisions implemented:** D22
-- **Depends on:** none
-- **Scope:** DLQ topic per consumer group wired into the shared consumer library (park after N retries); `tools/` CLI for park/inspect/replay; depth alerting.
-- **Definition of Done:**
-  - Library parks poison messages after 3 retries; all consumer groups covered.
-  - CLI merged with runbook; DLQ-depth alert per group.
-  - Replay path proven against a fixed poison fixture.
-- **Test criteria:**
-  - Poison message parks without blocking its partition; consumer lag recovers < 60 s.
-  - Replay after fix converges exactly-once (inbox dedupe asserted, zero duplicates).
-- **Effort:** 1 week.
-
-### P1-T7: Test backdoors compiled out of production
-- **Team:** DevEx
-- **Decisions implemented:** D29
-- **Depends on:** none
-- **Scope:** `X-Test-Clock` / `X-Flag-Override` handlers behind a build tag excluded from prod images; gateway strips `X-Test-*` unconditionally (config PR to Compute/Delivery); log-based alert on any appearance in prod. Three independent layers.
-- **Definition of Done:**
-  - Prod-tagged builds contain no backdoor symbols (CI symbol scan).
-  - Gateway strip rule deployed to all cells.
-  - Prod-log alert live; docs 03 §5 annotated with the prod-safety note.
-- **Test criteria:**
-  - CI fails a fixture build that leaks the handler into a prod-tagged image.
-  - Header sent to staging-in-prod-mode: echoed absent downstream + alert fires < 1 min.
-- **Effort:** 1 week.
-
-### P1-T8: Quotes move to Redis, HMAC-signed
-- **Team:** Growth
-- **Decisions implemented:** D10
-- **Depends on:** none
-- **Scope:** Quotes (10-min TTL) stored in Redis and HMAC-signed (body + expiry); checkout verifies signature and expiry; PG persistence only at checkout. Out of scope: pricing logic changes.
-- **Definition of Done:**
-  - Flag-gated rollout complete in staging + one prod cell; PG quote writes occur only at checkout.
-  - Signing keys managed via config with rotation runbook.
-  - Pricing dashboard shows quote-store hit/verify metrics.
-- **Test criteria:**
-  - Tampered quote ⇒ 422 `QUOTE_INVALID`; expired quote ⇒ 422; 100% of fixtures.
-  - Staging replay: pricing PG write rate reduced ≥ 95%; checkout E2E green.
-- **Effort:** 1 week.
-
-### P1-T9: Topic-versioning schema rules in the registry
+### S-T5: Contracts platform — OpenAPI + schema registry + Pact broker
 - **Team:** Data Platform
 - **Decisions implemented:** D30
-- **Depends on:** none
-- **Scope:** Registry policy: additive-only within a topic; shape changes require a new topic (`<event>.v2`) with a dual-publish window and enforced deprecation date; migrate the 02 §4.3 `schema_version` wording in `contracts/`.
+- **Depends on:** S-T1
+- **Scope:** `contracts/` as the single source: OpenAPI per service/BFF, event schema registry with D30 rules (additive-only per topic; shape change ⇒ new `.v2` topic + dual-publish + enforced deprecation date), Pact broker gating CI, contract-stub generation so slices can develop against unbuilt neighbors.
 - **Definition of Done:**
-  - Registry CI rule active; deprecation-date field mandatory on `.v2` topics.
-  - `contracts/` docs updated with one worked `.v2` example.
-  - Existing topics audited for latent shape-change risk; findings ticketed.
+  - Registry + broker live and wired into the S-T2 pipeline as merge gates.
+  - Stub generator produces runnable service stubs from any published contract.
+  - Worked `.v2` dual-publish example in `contracts/`.
 - **Test criteria:**
-  - Fixture PR making an in-place shape change ⇒ registry CI red.
-  - `.v2` dual-publish fixture ⇒ both old and new consumers green through the window.
-- **Effort:** 1 week.
-
-## Phase 2 — Cells, identity, residency
-
-### P2-T1: Global control plane (user-directory, config/flags, routing table)
-- **Team:** Identity & Trust
-- **Decisions implemented:** D1, D3
-- **Depends on:** none
-- **Scope:** `user-directory` service (`user_id → home cell, jurisdiction`) replicated to every cell; config/flag replication; versioned cell routing table distribution. Async, last-write-wins (near-zero churn).
-- **Definition of Done:**
-  - Directory deployed to two cells with replication; SLO + runbook + `ownership.yaml`.
-  - Flags/config replicate cross-cell; routing table versioned and consumed by the edge.
-  - Failure-mode doc: stale-tolerant reads specified.
-- **Test criteria:**
-  - Cell-local directory lookup p99 < 10 ms; replication lag p99 < 5 s.
-  - Replication halted 10 min ⇒ cells serve stale-but-valid data with zero errors.
+  - Fixture PR with an in-place topic shape change ⇒ registry CI red; `.v2` dual-publish fixture ⇒ both consumer generations green.
+  - Breaking a published pact ⇒ provider build red.
 - **Effort:** 2 weeks.
 
-### P2-T2: Identity split — identity-auth / identity-profile
-- **Team:** Identity & Trust
-- **Decisions implemented:** D3
-- **Depends on:** P2-T1
-- **Scope:** Split `identity` into `identity-auth` (credentials, tokens, signing keys) and `identity-profile` (per-jurisdiction PII stores); migrate data; in-country stores for ID and VN.
-- **Definition of Done:**
-  - Both services live; old `identity` retired; contract tests updated.
-  - PII rows physically located per jurisdiction (verified against the data inventory).
-  - Network policy denies any non-owning-cell access to PII stores.
-- **Test criteria:**
-  - Migration parity checksums 100%; login/registration E2E green in both cells.
-  - Cross-cell profile read succeeds only via the owning cell's API (policy test).
-- **Effort:** 2 weeks.
-
-### P2-T3: JWT-at-edge + revocation denylist; introspection deleted
-- **Team:** Identity & Trust
-- **Decisions implemented:** D4
-- **Depends on:** P2-T2
-- **Scope:** 15-min ES256 JWTs signed per cell; gateways verify locally with cached JWKS; bloom-filter denylist replicated ≤ 30 s; introspection removed from the hot path (refresh flows still hit identity-auth).
-- **Definition of Done:**
-  - All gateways on local verification in both cells; introspection endpoints removed from request path.
-  - Denylist pipeline live; key-rotation runbook rehearsed.
-  - Auth-overhead and revocation-lag dashboards.
-- **Test criteria:**
-  - Gateway authn adds < 1 ms p99; forged/expired tokens rejected 100%.
-  - Revoked token rejected ≤ 30 s later in every cell.
-  - identity-auth 10-min outage simulation ⇒ authenticated-traffic error rate unchanged.
-- **Effort:** 2 weeks.
-
-### P2-T4: Second cell + cell-router GA + city cutover
-- **Team:** Compute/Delivery
-- **Decisions implemented:** D1, D2
-- **Depends on:** P2-T1, P2-T3
-- **Scope:** Stand up a second full cell from IaC; GeoDNS/Anycast to nearest gateway; cell-router GA (H3 res-5 / `city_id` → cell, header override for tests); write and rehearse the city cutover playbook with one pilot city.
-- **Definition of Done:**
-  - Second cell passes smoke + E2E with golden scenarios.
-  - Router GA at the edge; routing table from P2-T1 consumed live.
-  - Pilot city cut over (and rolled back once) per playbook.
-- **Test criteria:**
-  - Cutover + rollback windows: order success rate ≥ baseline, zero failed orders attributed to the flip.
-  - Router resolution p99 < 2 ms; wrong-cell request rate < 0.01%.
-- **Effort:** 2 weeks.
-
-### P2-T5: Per-cell Kafka, aggregate_id keys, telemetry cluster split
+### S-T6: Event backbone — CDC outbox, partitioned inbox, DLQ + replay
 - **Team:** Data Platform
-- **Decisions implemented:** D5
-- **Depends on:** P2-T4
-- **Scope:** Per-cell transactional Kafka clusters; migrate topic keys from `region:aggregate_id` to `aggregate_id` (dual-publish window per D30); separate quota-capped telemetry cluster; MM2 restricted to directory/analytics/DR topics. Partition counts from `capacity-model.yaml`.
+- **Decisions implemented:** D8, D22
+- **Depends on:** S-T1, S-T3, S-T5
+- **Scope:** Debezium log-based CDC outbox platform (no pollers), time-partitioned outbox/inbox with partition-drop cleanup (7-day inbox) and documented skip-inbox rule, DLQ per consumer group in the shared consumer lib (park after 3 retries) + park/inspect/replay CLI.
 - **Definition of Done:**
-  - Both cells on their own transactional clusters; key migration complete, old topics deprecated with dates.
-  - Telemetry cluster live with quotas; MM2 flows documented and limited.
-  - Partition-count derivation checked into `contracts/`.
+  - Outbox/inbox/DLQ libs merged; Debezium connector template in `deploy/`.
+  - Replay CLI in `tools/` with runbook; relay-lag + DLQ-depth alerts templated.
+  - Reference service publishes/consumes through the full path in the E2E env.
 - **Test criteria:**
-  - Telemetry flood at 2× design (600k msg/s simulated) ⇒ transactional publish p99 < 20 ms, unchanged.
-  - Per-aggregate ordering property test green across the key migration.
+  - 10k events/s soak 2 h ⇒ relay lag p99 < 2 s, zero autovacuum alerts; partition drop with zero event loss (offset audit).
+  - 10× duplicate-delivery burst ⇒ zero duplicate side effects; poison message parks without blocking (lag recovers < 60 s), replay converges exactly-once.
 - **Effort:** 2 weeks.
 
-### P2-T6: PII tokenization in events + crypto-shredding erasure + data register
-- **Team:** Identity & Trust
-- **Decisions implemented:** D3
-- **Depends on:** P2-T2
-- **Scope:** All events/order snapshots carry `usr_`/`adr_` tokens only; per-user data keys (envelope encryption) in the PII store; erasure API destroys the key; machine-readable data-inventory + retention register, CI-validated.
-- **Definition of Done:**
-  - PII scanner runs in CI on event fixtures and sampled non-prod logs.
-  - Erasure API + runbook live; DPO sign-off recorded.
-  - Register checked in; CI fails when a new table/topic lacks a register entry.
-- **Test criteria:**
-  - Scanner: zero raw PII in golden-traffic events and logs.
-  - Erasure fixture: user PII unreadable across stores + backups ≤ 72 h (key destroyed) while order replay still succeeds with tokens.
-  - Register-drift fixture (new unregistered table) ⇒ CI red.
-- **Effort:** 2 weeks.
-
-## Phase 3 — Data layer scale-out
-
-### P3-T1: Shard orders by hash(customer_id)
-- **Team:** Marketplace
-- **Decisions implemented:** D6
-- **Depends on:** P0-T5
-- **Scope:** `orders`, `order_events`, outbox onto 256 logical / 4 physical shards keyed by `hash(customer_id)`: dual-write → backfill → verify → flag-gated cutover. Merchant-facing reads move to P3-T3's model.
-- **Definition of Done:**
-  - Cutover complete in staging + one prod cell; parity report published.
-  - Rollback rehearsed during dual-write phase; per-shard dashboards live.
-  - Cross-shard queries removed from the service (lint rule active).
-- **Test criteria:**
-  - Pre-cutover checksum parity 100% (row counts + sampled content).
-  - Cutover window: zero 5xx on order APIs.
-  - 1.5× load: per-shard writes < 100/s; checkout p99 < 800 ms.
-- **Effort:** 2 weeks.
-
-### P3-T2: Shard payment + ledger tables by hash(order_id)
-- **Team:** Payments
-- **Decisions implemented:** D6
-- **Depends on:** P3-T1
-- **Scope:** Same dual-write/backfill/verify/cutover pattern for payments and ledger-accrual tables keyed by `hash(order_id)`.
-- **Definition of Done:**
-  - Cutover complete in staging + one prod cell; parity report published.
-  - Per-shard invariant checks wired (feeds P6-T7); rollback rehearsed.
-- **Test criteria:**
-  - Parity checksums 100%; zero failed or duplicated payments during cutover (ledger scan).
-  - 7-day soak: hourly cross-shard invariants hold (accounts sum to zero).
-- **Effort:** 2 weeks.
-
-### P3-T3: Merchant-queue CQRS read model
-- **Team:** Marketplace
-- **Decisions implemented:** D7
-- **Depends on:** P1-T3, P1-T4
-- **Scope:** Merchant incoming-order read model sharded by `merchant_id`, projected from `order.*` events; merchant-bff reads it exclusively; rebuild tooling included.
-- **Definition of Done:**
-  - Read model serving merchant-bff in staging + one prod cell.
-  - Direct order-DB merchant queries removed.
-  - Rebuild command documented and executed once end-to-end.
-- **Test criteria:**
-  - Freshness p99 < 2 s from `order.paid` at 1.5× peak.
-  - Full rebuild of the largest cell < 1 h; projection vs event-store spot check 100% consistent on 10k orders.
-- **Effort:** 2 weeks.
-
-### P3-T4: order_events tiering to Iceberg + dual-store replayer
-- **Team:** Data Platform
-- **Decisions implemented:** D8
-- **Depends on:** P1-T3
-- **Scope:** CDC `order_events` → Iceberg/Parquet; PG retains 30-day daily partitions (auto-drop); replayer library reads PG + S3 transparently behind one interface.
-- **Definition of Done:**
-  - Pipeline live; PG partitions auto-dropped at 30 days.
-  - Replayer adopted by the order service (audit/debug path).
-  - Lake tables documented and queryable by Data Platform tooling.
-- **Test criteria:**
-  - Replay of a 6-month-old order byte-identical to its golden fixture.
-  - Tiering lag p99 < 15 min; PG storage plateaus over a 45-day soak.
-- **Effort:** 2 weeks.
-
-### P3-T5: Purpose-scoped Redis Clusters per cell
-- **Team:** Storage/DB
-- **Decisions implemented:** D9, D15
-- **Depends on:** none
-- **Scope:** Split the shared Redis into per-cell clusters: geo, sessions, cache — each with fit-for-purpose persistence and eviction; migrate clients via config; decommission the shared instance.
-- **Definition of Done:**
-  - Three clusters live per cell; client libraries repointed; old cluster gone.
-  - Per-cluster dashboards + eviction/persistence policies documented.
-- **Test criteria:**
-  - Cache-cluster FLUSHALL under 1.5× load ⇒ error rate < 0.1%, zero correctness violations (idempotency + money invariants green).
-  - Session-cluster failover ⇒ forced re-auth for < 5% of active sessions.
-- **Effort:** 2 weeks.
-
-### P3-T6: Online resharding drill (4 → 8 physical clusters)
-- **Team:** Storage/DB
-- **Decisions implemented:** D6
-- **Depends on:** P3-T1
-- **Scope:** Execute a full 4→8 physical remap in staging under load using the remap tool; harden the tool; produce a timed runbook and schedule the drill quarterly.
-- **Definition of Done:**
-  - Drill executed end-to-end; tool gaps fixed and merged.
-  - Timed runbook published; quarterly calendar entry created.
-- **Test criteria:**
-  - Zero write errors and zero misroutes during remap at 1× model load.
-  - Total drill < 4 h; post-remap placement verification 100%.
-- **Effort:** 2 weeks.
-
-## Phase 4 — Telemetry & realtime
-
-### P4-T1: location-gateway streaming ingest tier
-- **Team:** Location
-- **Decisions implemented:** D14
-- **Depends on:** P2-T5
-- **Scope:** Per-cell `location-gateway`: gRPC bidi streams (MQTT fallback), auth once per connection, ~64-byte frames, 100 ms batching into telemetry Kafka (key `driver_id`, 512 partitions). Dual-runs with legacy HTTP ingest (removed in P4-T5).
-- **Definition of Done:**
-  - Tier deployed per cell with connection-count HPA; SLO + runbook + `ownership.yaml`.
-  - Driver-app beta cohort on streams; legacy path untouched.
-  - Ingest and connection dashboards live.
-- **Test criteria:**
-  - 300k msg/s sustained 1 h ⇒ gateway p99 < 5 ms, zero Kafka produce errors.
-  - 100k-driver reconnect storm recovered < 60 s.
-  - Zero per-message auth calls (auth-once verified by trace sampling).
-- **Effort:** 2 weeks.
-
-### P4-T2: H3-sharded Redis geo index + dispatch kNN
-- **Team:** Location
-- **Decisions implemented:** D15
-- **Depends on:** P3-T5
-- **Scope:** Live positions keyed by H3 res-7 cell (30 s TTL) in the geo Redis cluster; dispatch kNN reads order cell + 6 neighbors; single-GEO-key path removed.
-- **Definition of Done:**
-  - Dispatch reads the new index in staging + one prod cell; old path deleted.
-  - Key-skew dashboard live.
-- **Test criteria:**
-  - kNN p99 < 10 ms at 200k writes/s.
-  - Hottest H3 key < 2% of total writes on `load-500k-drivers`.
-  - Candidate-recall parity vs old path ≥ 99.9% on fixtures.
-- **Effort:** 2 weeks.
-
-### P4-T3: Flink cold path; PG exits live location
-- **Team:** Location
-- **Decisions implemented:** D15
-- **Depends on:** P4-T1
-- **Scope:** Flink job downsamples telemetry 1:10 → Iceberg for analytics/ML; PG reduced to per-trip summary polylines; raw-track PG writes deleted.
-- **Definition of Done:**
-  - Job live with checkpointing; PG schema slimmed; analytics tables documented.
-  - Location PG storage growth curve published.
-- **Test criteria:**
-  - PG location writes < 500/s per cell.
-  - Flink exactly-once verified by replay (record counts match ±0).
-  - Lake freshness < 5 min.
-- **Effort:** 2 weeks.
-
-### P4-T4: Realtime gateway tier (customer tracking)
-- **Team:** Location
-- **Decisions implemented:** D16
-- **Depends on:** none
-- **Scope:** Stateless WebSocket/SSE gateway tier: per-order channels, 1 msg/3 s throttle, connection-count HPA, graceful drain + resume tokens on deploy; BFFs return gateway URL + channel token; 10 s polling fallback retained.
-- **Definition of Done:**
-  - Tier live; customer tracking migrated off BFF polling in one cell.
-  - Drain hooked into Argo Rollouts; capacity dashboard (conns/pod) live.
-  - SLO + runbook + `ownership.yaml`.
-- **Test criteria:**
-  - 2M synthetic connections held; fan-out 650k msg/s sustained.
-  - Rolling deploy ⇒ ≥ 99.9% of clients resume < 5 s with zero message loss on active orders.
-- **Effort:** 2 weeks.
-
-### P4-T5: Driver protocol migration + legacy decommission
-- **Team:** Location
-- **Decisions implemented:** D14
-- **Depends on:** P4-T1
-- **Scope:** Staged driver-app rollout of the streaming protocol with kill-switch; decommission legacy HTTP ingest once adoption > 95%.
-- **Definition of Done:**
-  - Adoption dashboard; app-store rollout complete.
-  - Legacy path removed; 30 incident-free days post-decommission recorded.
-- **Test criteria:**
-  - Adoption ≥ 95% before decommission.
-  - Post-decommission ingest loss rate < 0.01%.
-  - Driver-app battery regression < 5% vs baseline cohort.
-- **Effort:** 2 weeks.
-
-## Phase 5 — Dispatch & discovery
-
-### P5-T1: Zone-owned batch matcher
-- **Team:** Logistics
-- **Decisions implemented:** D13
-- **Depends on:** P4-T2
-- **Scope:** H3-zone single-writer matcher (Kafka partition per zone), 1–2 s tick, greedy-with-swaps batch assignment, deterministic logged snapshots. Legacy greedy stays behind a flag until P5-T2 completes.
-- **Definition of Done:**
-  - Matcher live in staging + one pilot city.
-  - Snapshot log queryable (assignment explainability preserved per 01 §6).
-  - Determinism harness in CI.
-- **Test criteria:**
-  - Snapshot replay reproduces identical assignments 100%.
-  - Assignment p95 < 5 s at 1.5× peak-city density.
-  - Sum-of-pickup-ETA ≥ 10% better than greedy baseline on `load-peak-city`.
-- **Effort:** 2 weeks.
-
-### P5-T2: Driver reservations + offer flow rework
-- **Team:** Logistics
-- **Decisions implemented:** D13
-- **Depends on:** P5-T1
-- **Scope:** Exclusive 10 s driver reservations placed before offers; offer flow reworked in dispatch + driver-bff; first-accept-wins `409 OFFER_TAKEN` path and the legacy greedy flag deleted.
-- **Definition of Done:**
-  - Reservation store live; driver-bff offer card updated.
-  - 409 path and greedy code removed.
-- **Test criteria:**
-  - Offer-conflict rate < 0.5% at peak density.
-  - Reservation leak rate 0 in a 24 h soak (TTL reclaim audited).
-  - Offer → accept p95 < 3 s.
-- **Effort:** 2 weeks.
-
-### P5-T3: Search split + per-cell OpenSearch with H3 routing
-- **Team:** Discovery
-- **Decisions implemented:** D17
-- **Depends on:** P2-T4
-- **Scope:** Split `search` into `search-indexer` + `search-query`; per-cell OpenSearch domains, index per country, shard routing by H3 res-5; retire the shared index.
-- **Definition of Done:**
-  - Both cells on their own domains; old index retired.
-  - Shard-routing verified in query profiles; dashboards live.
-- **Test criteria:**
-  - 30k QPS at p99 < 150 ms.
-  - ≥ 99% of geo queries touch ≤ 2 shards (profiler assertion).
-  - Index freshness p99 < 30 s.
-- **Effort:** 2 weeks.
-
-### P5-T4: Index flood control — debounce, salted keys, bulk backpressure
-- **Team:** Discovery
-- **Decisions implemented:** D17, D11
-- **Depends on:** P5-T3
-- **Scope:** Rating-aggregate debounce (≤ 1 doc update/merchant/5 min); salted keys `merchant_id#0..15` on menu/rating topics (dual-publish per D30) with the per-salt-ordering contract note; bulk-index pipeline with backpressure on dedicated ingest nodes.
-- **Definition of Done:**
-  - Debouncer live; salted topics cut over with deprecation dates on old ones.
-  - Ingest nodes isolated from query nodes.
-  - Consumer contract note merged in `contracts/`.
-- **Test criteria:**
-  - 150k-item chain menu update ⇒ feed p99 unchanged (± 10%), reindex completes < 10 min.
-  - Hottest salt partition < 2× mean partition load.
-  - Rating doc-update rate bounded at merchants/5 min.
-- **Effort:** 2 weeks.
-
-### P5-T5: Ranking service + static fallback
-- **Team:** Discovery
-- **Decisions implemented:** D17
-- **Depends on:** P5-T3
-- **Scope:** `ranking` service re-ranks OS top-500 → top-50 with an event-fed feature store; static-ranking fallback flag doubling as shed-ladder L1. Model quality iteration out of scope.
-- **Definition of Done:**
-  - Live in one cell; model deploy pipeline documented.
-  - Fallback drill executed; SLO + `ownership.yaml`.
-- **Test criteria:**
-  - Re-rank adds < 50 ms p99.
-  - Ranking outage ⇒ feed availability ≥ 99.9% via auto-fallback < 10 s.
-  - Fallback flag flip: availability unchanged (CTR delta measured, non-gating).
-- **Effort:** 2 weeks.
-
-### P5-T6: Feed + merchant-page caches with stampede protection
-- **Team:** Discovery
-- **Decisions implemented:** D11, D17
-- **Depends on:** P5-T3
-- **Scope:** Geo-tile feed cache (stale-while-revalidate, CDN-fronted) and merchant-page two-tier cache (in-process singleflight 1 s over Redis 10 s).
-- **Definition of Done:**
-  - Both caches live; hit-rate dashboards; CDN integration for feed tiles.
-  - Stampede protection verified in staging.
-- **Test criteria:**
-  - 1M RPS synthetic on one merchant page ⇒ catalog origin ≤ 1 QPS.
-  - Cold-tile stampede (10k concurrent) ⇒ exactly 1 origin fetch.
-  - Feed cache hit rate ≥ 85% at peak.
-- **Effort:** 2 weeks.
-
-### P5-T7: Discovery load gates in the release pipeline
-- **Team:** Discovery
-- **Decisions implemented:** D24
-- **Depends on:** P5-T3, P5-T4, P5-T5, P5-T6
-- **Scope:** Wire discovery load tests at 1.5× model numbers into the release pipeline as a gate for capacity-affecting changes; define the "capacity-affecting" PR class.
-- **Definition of Done:**
-  - Gate active in CI/CD; PR-class labeling documented.
-  - Monthly perf-cell run includes the discovery suite.
-- **Test criteria:**
-  - Seeded 20% latency-regression fixture ⇒ gate red; baseline ⇒ green.
-- **Effort:** 1 week.
-
-## Phase 6 — Money & risk
-
-### P6-T1: PSP-hosted fields; PAN removed from our stack
-- **Team:** Payments
-- **Decisions implemented:** D18
-- **Depends on:** none
-- **Scope:** Card capture via PSP-hosted fields/SDKs in apps and web; delete every PAN-touching endpoint from clients, BFFs, and services.
-- **Definition of Done:**
-  - All card entry via hosted fields; old card endpoints removed.
-  - PSP webhook signature verification in place; app releases shipped.
-- **Test criteria:**
-  - Automated scanner on staging traffic: zero PAN-shaped payloads outside PSP domains.
-  - Auth success parity within ± 0.5% of baseline.
-- **Effort:** 2 weeks.
-
-### P6-T2: Minimal CDE — card-vault + network tokens
-- **Team:** Payments
-- **Decisions implemented:** D18
-- **Depends on:** P6-T1
-- **Scope:** Isolated CDE account/VPC per cell-group containing only `card-vault` (HSM-backed, portable tokens for cross-PSP routing) and PSP connectors; network-token enrollment where issuers support it.
-- **Definition of Done:**
-  - Vault live; CDE contains exactly vault + connectors (audited).
-  - Network tokens active in ≥ 1 market; access controls reviewed.
-  - SLO + runbook + `ownership.yaml`.
-- **Test criteria:**
-  - Tokenize/detokenize p99 < 10 ms.
-  - Vault outage simulation ⇒ degrade to single-PSP mode with checkout availability ≥ 99.9%.
-  - Pen test: zero PAN egress paths from the CDE.
-- **Effort:** 2 weeks.
-
-### P6-T3: Risk service v1 in the saga
-- **Team:** Identity & Trust
-- **Decisions implemented:** D19
-- **Depends on:** none
-- **Scope:** `risk` service between quote and authorize: device fingerprint, velocity rules, promo-abuse graph, ML score; verdicts allow / 3DS step-up (new saga branch) / deny. Ships in shadow mode first, then enforcing behind a flag.
-- **Definition of Done:**
-  - Shadow mode live, then enforcing in one cell (flag documented).
-  - 3DS branch added to the saga + state machine, contract-tested.
-  - Case-review console in admin-bff; retrain pipeline documented.
-- **Test criteria:**
-  - Saga overhead < 100 ms p99.
-  - Labeled fraud replay: recall ≥ 80% at ≤ 1% false-positive decline rate.
-  - 3DS step-up E2E green including the abandonment path.
-- **Effort:** 2 weeks.
-
-### P6-T4: Edge abuse controls feeding risk
-- **Team:** Compute/Delivery
-- **Decisions implemented:** D19
-- **Depends on:** P6-T3
-- **Scope:** Endpoint-class token buckets (per user/device/IP) on auth, promo, and search classes; mobile device attestation (Play Integrity / App Attest) on risky operations; abuse signals streamed to `risk`.
-- **Definition of Done:**
-  - Bucket classes live at the gateway; attestation enforced on risky ops.
-  - Signal topic produced and consumed by `risk`.
-  - Abuse dashboard + runbook.
-- **Test criteria:**
-  - Credential-stuffing simulation (10k IPs) blocked ≥ 99% with < 0.1% impact on golden legitimate traffic.
-  - Promo-farming simulation flagged in `risk` within 5 min.
-- **Effort:** 2 weeks.
-
-### P6-T5: Multi-PSP smart routing + failover
-- **Team:** Payments
-- **Decisions implemented:** D20
-- **Depends on:** P6-T2
-- **Scope:** Route per (country, method) weighted by rolling auth-rate and fee; auto-failover on 5-min error rate > 3× baseline or auth-rate drop > 5 pts; onboard a second PSP in ≥ 2 markets using a templated adapter.
-- **Definition of Done:**
-  - Router live; second PSPs onboarded; per-PSP dashboards.
-  - Adapter template documented (2-week onboarding target).
-  - Failover drill executed.
-- **Test criteria:**
-  - Primary-PSP kill at 1.5× peak ⇒ auth success dip < 2% for < 60 s; zero lost or duplicated payments.
-  - Routing shift observable in metrics < 30 s after breach.
-- **Effort:** 2 weeks.
-
-### P6-T6: Auth-window management
-- **Team:** Payments
-- **Decisions implemented:** D20
-- **Depends on:** P1-T5
-- **Scope:** Scheduled orders authorize at T−30 min via durable timers (not at scheduling time); re-auth job refreshes auths aging past the PSP window; capture-by deadline metric + alert per order.
-- **Definition of Done:**
-  - Scheduled-order flow migrated; re-auth job live; state-machine additions contract-tested.
-  - Capture-by alert wired to the payments pager.
-- **Test criteria:**
-  - Fixture crossing a 24 h auth window ⇒ re-auth fires and capture succeeds.
-  - 7-day soak: zero captures attempted against expired auths.
-  - Capture-by breach alerts < 5 min after deadline.
-- **Effort:** 2 weeks.
-
-### P6-T7: Standalone double-entry ledger service
-- **Team:** Money Movement
-- **Decisions implemented:** D21
-- **Depends on:** P3-T2
-- **Scope:** Append-only, hash-chained, day+cell-partitioned `ledger` service; `payment` and `settlement` write through its API; hourly invariant job (accounts sum to zero; captured − refunded = payables + commission).
-- **Definition of Done:**
-  - Ledger live; both writers migrated; hash-chain verification tool merged.
-  - Invariant job + alert live; SLO + runbook + `ownership.yaml`.
-- **Test criteria:**
-  - 7-day soak at 1.5× volume: hourly invariants show zero drift.
-  - Hash-chain verification passes over the full soak window.
-  - Ledger write p99 < 20 ms.
-- **Effort:** 2 weeks.
-
-### P6-T8: T+1 automated reconciliation + break queue
-- **Team:** Money Movement
-- **Decisions implemented:** D21
-- **Depends on:** P6-T7
-- **Scope:** Nightly T+1 recon: ingest multi-PSP settlement files, 3-way match (file ↔ ledger ↔ order events), break queue with 48 h SLA and console in admin-bff.
-- **Definition of Done:**
-  - Recon job scheduled; console live for finance; runbook published.
-  - Auto-match ≥ 99.5% demonstrated on production-shape data.
-  - Break-aging dashboard + SLA alert.
-- **Test criteria:**
-  - Seeded 0.5%-discrepancy dataset ⇒ 100% surfaced as breaks, zero silent.
-  - Recon completes < 4 h for a 5M-order day.
-- **Effort:** 2 weeks.
-
-### P6-T9: PCI-DSS Level 1 assessment (CDE-scoped)
-- **Team:** Payments
-- **Decisions implemented:** D18
-- **Depends on:** P6-T1, P6-T2
-- **Scope:** Evidence pack and external QSA assessment scoped to the CDE; remediation of findings; annual compliance calendar.
-- **Definition of Done:**
-  - ROC issued with scope statement = CDE only.
-  - All remediations closed; annual calendar + quarterly scan schedule set.
-- **Test criteria:**
-  - Segmentation pen test confirms non-CDE networks cannot reach PANs.
-  - Quarterly ASV scans clean.
-- **Effort:** 2 weeks.
-
-## Phase 7 — Overload defenses & notifications
-
-### P7-T1: Kitchen-capacity admission tokens
-- **Team:** Marketplace
-- **Decisions implemented:** D11
-- **Depends on:** none
-- **Scope:** Per-merchant kitchen-capacity token bucket (default 30 accepts/10 min, merchant-tunable) applied in quote + accept; exhaustion inflates quoted prep ETA and shows a busy badge — never a checkout failure.
-- **Definition of Done:**
-  - Admission live in staging + one prod cell; merchant setting exposed in merchant-bff.
-  - Busy badge in customer payloads; dashboards for admission rates.
-- **Test criteria:**
-  - 50× flash-sale simulation on one merchant ⇒ zero checkout 5xx.
-  - Accept rate equals configured capacity ± 5%; ETAs inflate monotonically and recover after the spike.
-- **Effort:** 2 weeks.
-
-### P7-T2: Load-shed ladder L1–L4 + waiting room
-- **Team:** SRE/Observability
-- **Decisions implemented:** D12
-- **Depends on:** P5-T5, P5-T6
-- **Scope:** Per-cell overload controller with flag-driven levels: L1 static ranking, L2 cached geo-tile feed, L3 checkout waiting room (FIFO token bucket with shown ETA), L4 pause signups; BFF hooks for all levels.
-- **Definition of Done:**
-  - Controller + waiting-room service live; all four levels wired into BFFs.
-  - Drill runbook published; ladder-state dashboard.
-- **Test criteria:**
-  - 8× city-spike simulation ⇒ levels engage in order at thresholds; checkout availability ≥ 99.9% for admitted users.
-  - De-escalation clean: no level flapping (hysteresis verified over 3 cycles).
-- **Effort:** 2 weeks.
-
-### P7-T3: Notification priority tiers + staleness gates
-- **Team:** Growth
-- **Decisions implemented:** D23
-- **Depends on:** P1-T4
-- **Scope:** Split notification topics into transactional / operational / marketing tiers with independent consumer groups; per-message-type staleness TTL checked at consume; APNs/FCM provider token buckets.
-- **Definition of Done:**
-  - Tiers live; every message type declares its TTL in `contracts/`.
-  - Provider buckets configured; per-tier lag dashboards + alerts.
-- **Test criteria:**
-  - 30-min consumer pause + 1M backlog resume ⇒ ≥ 99% stale status pushes dropped; live transactional push p99 < 10 s throughout recovery.
-  - Marketing burst never delays transactional (isolation test, p99 unchanged).
-- **Effort:** 2 weeks.
-
-### P7-T4: Campaign batch fan-out pipeline
-- **Team:** Growth
-- **Decisions implemented:** D23
-- **Depends on:** P7-T3
-- **Scope:** Separate batch pipeline for marketing campaigns (audience query → rate-shaped send), capacity-isolated from transactional consumers; campaign console with per-campaign rate caps.
-- **Definition of Done:**
-  - Pipeline + console live; marketing traffic fully off shared consumers.
-  - Rate caps enforced per campaign.
-- **Test criteria:**
-  - 20M-recipient campaign ⇒ transactional push p99 unchanged (± 10%).
-  - Campaign send rate stays within its configured envelope 100% of the run.
-- **Effort:** 2 weeks.
-
-### P7-T5: "Monsoon" city-spike drill
-- **Team:** SRE/Observability
-- **Decisions implemented:** D12, D13
-- **Depends on:** P7-T1, P7-T2
-- **Scope:** Scripted chaos scenario: 8× single-city demand spike with simultaneous driver-supply drop; monthly schedule; published scorecard (ladder timing, dispatch p95, checkout availability).
-- **Definition of Done:**
-  - Scenario merged into the chaos suite; monthly calendar entry.
-  - First drill executed with scorecard published.
-- **Test criteria:**
-  - Shed ladder engages < 60 s after threshold breach.
-  - Dispatch assignment p95 < 5 s in batch mode during the spike.
-  - Zero money-invariant violations during the drill.
-- **Effort:** 1 week.
-
-## Phase 8 — DR & chaos
-
-### P8-T1: Tier-0 warm-standby replication
-- **Team:** Storage/DB
-- **Decisions implemented:** D25
-- **Depends on:** P3-T1, P3-T2
-- **Scope:** Replicate Tier-0 stores (order, payment, ledger, dispatch, identity-auth) to paired cells: PG logical replication per shard, MM2 shadow topics, S3 CRR; lag monitoring and standby sizing per the capacity model.
-- **Definition of Done:**
-  - All Tier-0 stores replicating for two cell pairs.
-  - Lag SLO dashboards + alerts; standby sizing documented.
-  - Weekly automated read-only promotion dry-run scheduled.
-- **Test criteria:**
-  - Replication lag p99 < 5 s at 1.5× peak.
-  - Weekly promotion dry-run passes consistency checks 4 weeks running.
-- **Effort:** 2 weeks.
-
-### P8-T2: City re-homing tool
-- **Team:** Compute/Delivery
-- **Decisions implemented:** D25
-- **Depends on:** P8-T1
-- **Scope:** Scripted evacuation: routing-table flip + user-directory update + replica promotion + DNS, with dry-run mode, abort path, and approvals workflow.
-- **Definition of Done:**
-  - Tool merged with dry-run + abort; approvals workflow wired.
-  - Staging evacuation executed; timed runbook published.
-- **Test criteria:**
-  - Staging city evacuation: measured RTO < 15 min.
-  - Dry-run emits a complete plan with zero mutations.
-  - Mid-flight abort leaves a verified-consistent state.
-- **Effort:** 2 weeks.
-
-### P8-T3: In-flight order recovery on failover
-- **Team:** Marketplace
-- **Decisions implemented:** D25
-- **Depends on:** P8-T1
-- **Scope:** Saga resume from the replicated event store on a promoted standby; PSP webhook replay closes the ≤ 5 s loss window; client re-sync protocol in BFF contracts. Payments team consulted on webhook replay.
-- **Definition of Done:**
-  - Resume logic merged; webhook replay tool merged.
-  - Client re-sync documented in BFF contracts; drill scenario added to the chaos suite.
-- **Test criteria:**
-  - Evacuation drill with 1k in-flight orders ⇒ 100% reach a terminal state; zero duplicate charges; zero lost payments.
-  - Loss-window orders reconciled < 30 min after failover.
-- **Effort:** 2 weeks.
-
-### P8-T4: Tier-1 rebuild-from-events automation
-- **Team:** Discovery
-- **Decisions implemented:** D25, D7
-- **Depends on:** P3-T4
-- **Scope:** Automated rebuild of Tier-1 read models in a recovery cell — search index, merchant-queue projection, ops order index — targeting < 1 h; quarterly verification run.
-- **Definition of Done:**
-  - Rebuild automation merged for all three models; progress dashboard.
-  - Quarterly verification scheduled; first run executed.
-- **Test criteria:**
-  - Timed rebuild of the largest cell's search index < 60 min.
-  - Rebuilt projection parity spot check: 100% on 10k sampled aggregates.
-- **Effort:** 2 weeks.
-
-### P8-T5: Weekly chaos under synthetic peak
-- **Team:** SRE/Observability
-- **Decisions implemented:** D26
-- **Depends on:** P0-T4, P1-T2
-- **Scope:** Weekly automated suite in the perf cell under synthetic peak: forced Redis failover during checkout storm, PG primary failover, brownout injection (+500 ms on identity/pricing), monthly AZ kill; money invariants asserted automatically; results feed the capacity CI.
-- **Definition of Done:**
-  - Suite scheduled weekly; invariant assertions automated.
-  - Results archived where P0-T1's CI job consumes them.
-  - Failure escalation path documented.
-- **Test criteria:**
-  - Every run: zero duplicate charges, zero lost orders.
-  - Brownout: checkout p99 < 800 ms with shed ladder active.
-  - PG primary failover: write unavailability < 30 s.
-- **Effort:** 2 weeks.
-
-### P8-T6: Production cell-evacuation game day
-- **Team:** SRE/Observability
-- **Decisions implemented:** D25, D26
-- **Depends on:** P8-T2, P8-T3
-- **Scope:** Quarterly production game day evacuating one real cell to its pair; measured RTO/RPO published against D25 targets; exec observers; gap tickets filed.
-- **Definition of Done:**
-  - First game day executed; report published with measured numbers.
-  - Gaps ticketed with owners; quarterly calendar established.
-- **Test criteria:**
-  - Measured RTO ≤ 15 min and RPO ≤ 5 s for Tier-0.
-  - Customer-visible error-budget burn within the monthly allowance.
-- **Effort:** 2 weeks.
-
-## Phase 9 — Cost & steady state
-
-### P9-T1: Log diet — sampling + tiered retention
-- **Team:** SRE/Observability
-- **Decisions implemented:** D27
-- **Depends on:** none
-- **Scope:** 1–5% INFO sampling on read paths (exemplar-linked) in `libs/logging` with per-route classes; full logging retained for mutations/errors/WARN+/payment/dispatch; retention 3 d hot → 30 d object storage → drop.
-- **Definition of Done:**
-  - Sampling live fleet-wide; retention policies applied.
-  - Log-schema tests updated; observability cost dashboard live.
-- **Test criteria:**
-  - Indexed volume < 60k lines/s at peak (from ~600k raw).
-  - 100% of error responses' `trace_id`s resolve end-to-end (errors never sampled).
-  - Observability spend reduced ≥ 60% vs baseline month.
-- **Effort:** 2 weeks.
-
-### P9-T2: Cost-per-order pipeline + ownership enforcement
-- **Team:** SRE/Observability
-- **Decisions implemented:** D27, D28
-- **Depends on:** none
-- **Scope:** $/order pipeline (CUR + Kubecost → per-team dashboards beside SLOs); complete `ownership.yaml` covering services, topics, dashboards, alerts, budget lines, CI-enforced; 80% budget alerts; monthly review ritual.
-- **Definition of Done:**
-  - $/order dashboard live with < 24 h lag; per-team budgets set against the $0.015/order envelope.
-  - `ownership.yaml` complete; CI fails unowned resources.
-  - Monthly review ritual documented with finance.
-- **Test criteria:**
-  - Unowned-resource fixture ⇒ CI red.
-  - Seeded 85%-burn scenario ⇒ budget alert fires.
-  - $/order reconciles with finance actuals ± 5%.
-- **Effort:** 2 weeks.
-
-### P9-T3: Spot compute + storage lifecycle + ingest quotas
-- **Team:** Compute/Delivery
-- **Decisions implemented:** D27
-- **Depends on:** none
-- **Scope:** ≥ 60% of stateless compute on spot with PDB-safe eviction handling; Kafka tiered storage (7 d hot / 90 d tiered); S3 lifecycle (30 d → IA, 180 d → Glacier); observability ingest quotas alerting at 80%.
-- **Definition of Done:**
-  - Spot node groups live for BFFs and stateless services; lifecycle policies applied.
-  - Quotas configured; savings report published.
-- **Test criteria:**
-  - Forced 20% spot eviction at peak ⇒ zero SLO breach.
-  - 30-day storage cost trend flattens post-lifecycle.
-  - Seeded ingest overrun ⇒ quota alert fires.
-- **Effort:** 2 weeks.
-
-### P9-T4: Shared multi-tenant preview infrastructure
+### S-T7: Fake providers + factories + seedctl + golden datasets
 - **Team:** DevEx
-- **Decisions implemented:** D29
-- **Depends on:** none
-- **Scope:** Replace per-PR full stacks: shared baseline stack + per-PR deploy of changed services + dependents with header routing (reusing the `run_id` isolation pattern of 03 §4); scale-to-zero after 2 h idle; 7-day TTL.
+- **Decisions implemented:** none (base blueprint, 03 §3/§5)
+- **Depends on:** S-T1, S-T5
+- **Scope:** `payment-sim` (scriptable PSP incl. webhooks and settlement files, decline/timeout cards), `map-sim` (deterministic routing/ETA), `notify-sink` (queryable inbox); `libs/factories` (Go + TS) and `seedctl` with declarative scenarios; golden datasets `demo-small` and `lunch-rush` (skewed load datasets live in V-T31).
 - **Definition of Done:**
-  - ApplicationSet migrated; per-PR URL behavior preserved; old full stacks removed.
-  - E2E gate runs unchanged against shared previews.
+  - All three fakes implement the exact adapter contracts from S-T5 and run in compose + E2E env.
+  - Every core entity has one factory; `make seed SCENARIO=lunch-rush` populates any stack via public APIs.
 - **Test criteria:**
-  - Preview cost per PR reduced ≥ 80%.
-  - E2E gate runtime within ± 10% of baseline.
-  - Cross-PR isolation: two PRs mutating the same entity type show zero data bleed.
+  - payment-sim: card `…0002` declines, `…0044` times out, webhooks fire — 100% deterministic across 50 seeded reruns.
+  - Same seed + scenario ⇒ byte-identical dataset on rerun.
 - **Effort:** 2 weeks.
 
-### P9-T5: Shadow traffic + quarterly capacity gate
-- **Team:** SRE/Observability
-- **Decisions implemented:** D24
-- **Depends on:** P0-T4
-- **Scope:** Mirror sampled production reads (PII-tokenized per D3) to canaries and the perf cell; quarterly capacity-model refresh ritual; wire "load-test pass at model numbers" into the growth-launch checklist as a release gate.
+### S-T8: Shared E2E environment + continuous-integration smoke
+- **Team:** DevEx
+- **Decisions implemented:** none (base blueprint, 03 §2)
+- **Depends on:** S-T2, S-T7
+- **Scope:** The standing shared E2E env where all slices integrate continuously: full topology with every not-yet-built service backed by its contract stub/fake, auto-swapped for the real implementation on each slice's merge; `make smoke` checkout→delivery path runs on every merge.
 - **Definition of Done:**
-  - Mirroring live with sampling config; privacy review recorded.
-  - Quarterly refresh scheduled; gate present in the launch checklist.
+  - E2E env live with 100% of the service catalog present (stub or real).
+  - Stub→real swap is automatic from deploy manifests; smoke runs post-merge and pages the merging team on red.
 - **Test criteria:**
-  - Mirroring adds < 0.1% overhead to production request latency.
-  - Seeded +20% latency regression on a canary caught by shadow comparison before rollout.
-  - Quarterly refresh emits a CI-consumable model update (P0-T1 job consumes it).
+  - Smoke (checkout→delivery vs fakes) green with zero real services and with any partial mix (verified at all-stubs, one-real, and all-real-but-one configurations).
+  - Stub-swap latency: real service live in E2E < 15 min after merge.
 - **Effort:** 2 weeks.
 
 ---
 
-**Task count: 63** (P0: 5, P1: 9, P2: 6, P3: 6, P4: 5, P5: 7, P6: 9, P7: 5, P8: 6, P9: 5).
-Acceptance: the platform meets the 05 §1 design point when every task's test
-criteria pass at 1.5× the capacity model and the quarterly game day (P8-T6)
-hits its RTO/RPO targets.
+## Phase V — PARALLEL FULLSTACK SLICES (no ordering; depend only on S-tasks)
+
+### V-T1: Identity & sessions slice
+- **Team:** Identity & Trust
+- **Decisions implemented:** D4
+- **Depends on:** S-T3, S-T5, S-T8
+- **Scope:** Register/login/refresh via customer-bff and driver-bff; `identity-auth` service + DB; 15-min ES256 JWTs verified locally at the gateway (cached JWKS) with a ≤ 30 s replicated bloom denylist; no introspection on the hot path.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `auth_jwt_edge` on).
+  - Unit/contract/integration/E2E tests merged and green; key-rotation runbook rehearsed.
+  - Gateway auth dashboards + revocation-lag alert live; SLO + `ownership.yaml`.
+- **Test criteria:**
+  - Gateway verification adds < 1 ms p99; forged/expired tokens rejected 100%.
+  - Revoked token rejected ≤ 30 s later; identity-auth 10-min outage ⇒ authenticated-traffic error rate unchanged.
+- **Effort:** 2 weeks.
+
+### V-T2: Profile, residency & erasure slice
+- **Team:** Identity & Trust
+- **Decisions implemented:** D3
+- **Depends on:** S-T3, S-T5, S-T6
+- **Scope:** `identity-profile` with per-jurisdiction PII stores (in-country for ID/VN); all events carry `usr_`/`adr_` tokens only; per-user data keys with crypto-shredding erasure API; CI-validated data-inventory + retention register; profile CRUD via customer-bff.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (profile CRUD + erasure demo).
+  - Four test levels green; PII scanner in CI; network policy denies non-owning-cell PII access.
+  - Register checked in; erasure runbook + DPO sign-off recorded.
+- **Test criteria:**
+  - Scanner: zero raw PII in golden-traffic events/logs; unregistered-table fixture ⇒ CI red.
+  - Erasure fixture: PII unreadable across stores + backups ≤ 72 h while order replay with tokens still succeeds.
+- **Effort:** 2 weeks.
+
+### V-T3: Merchant catalog & menus slice
+- **Team:** Discovery
+- **Decisions implemented:** none (base blueprint, 01 §1)
+- **Depends on:** S-T3, S-T5, S-T6
+- **Scope:** `merchant-catalog` service + DB; menu editor and store-status endpoints via merchant-bff (ETag/If-Match); publishes `menu.updated`, `store.status_changed` per contract.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `catalog_v1` on).
+  - Four test levels green incl. pacts for search/cart consumers; dashboards + alerts live.
+  - Stale-write protection verified (412 on ETag mismatch).
+- **Test criteria:**
+  - Menu CRUD p99 < 200 ms at 1k RPS; event publish lag p99 < 2 s.
+  - Concurrent-edit fixture: 100% of stale writes rejected with 412.
+- **Effort:** 2 weeks.
+
+### V-T4: Search & browse slice
+- **Team:** Discovery
+- **Decisions implemented:** D17, D11
+- **Depends on:** S-T5, S-T6, S-T8
+- **Scope:** `search-indexer` + `search-query`; per-cell OpenSearch, index per country, H3 res-5 shard routing; flood control: rating debounce (≤ 1 update/merchant/5 min), salted merchant keys `merchant_id#0..15`, bulk-index backpressure on dedicated ingest nodes; browse (`GET /v1/customer/home`) via customer-bff, fed by catalog/rating contract stubs.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `search_v2` on).
+  - Four test levels green; per-salt-ordering contract note merged; dashboards + freshness alert live.
+- **Test criteria:**
+  - 30k QPS at p99 < 150 ms; ≥ 99% of geo queries touch ≤ 2 shards; freshness p99 < 30 s.
+  - 150k-item chain menu update ⇒ feed p99 unchanged (± 10%), reindex < 10 min; hottest salt partition < 2× mean.
+- **Effort:** 2 weeks.
+
+### V-T5: Ranking slice
+- **Team:** Discovery
+- **Decisions implemented:** D17
+- **Depends on:** S-T5, S-T8
+- **Scope:** `ranking` service re-ranking search top-500 → top-50 with an event-fed feature store; static-ranking fallback flag (doubles as shed-ladder L1); consumes search contract stubs.
+- **Definition of Done:**
+  - Demo-able end-to-end via the browse BFF endpoint against fakes in the shared E2E env (flag `ranking_ml`, on and off both demoed).
+  - Four test levels green; model deploy pipeline documented; SLO + `ownership.yaml`.
+- **Test criteria:**
+  - Re-rank adds < 50 ms p99; ranking outage ⇒ feed availability ≥ 99.9% via auto-fallback < 10 s.
+- **Effort:** 2 weeks.
+
+### V-T6: Feed & merchant-page caches slice
+- **Team:** Discovery
+- **Decisions implemented:** D11, D17
+- **Depends on:** S-T3, S-T8
+- **Scope:** Geo-tile feed cache (stale-while-revalidate, CDN-fronted) and merchant-page two-tier cache (in-process singleflight 1 s over Redis 10 s), wired into customer-bff browse/merchant endpoints against search/catalog stubs.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `feed_cache` on).
+  - Four test levels green; hit-rate dashboards + stampede alert live.
+- **Test criteria:**
+  - 1M RPS synthetic on one merchant page ⇒ origin ≤ 1 QPS; cold-tile stampede (10k concurrent) ⇒ exactly 1 origin fetch.
+  - Feed cache hit ≥ 85% at peak profile.
+- **Effort:** 2 weeks.
+
+### V-T7: Cart slice
+- **Team:** Marketplace
+- **Decisions implemented:** none (base blueprint, 01 §1)
+- **Depends on:** S-T3, S-T5, S-T8
+- **Scope:** `cart` service (Redis snapshot + PG), add/remove/get via customer-bff, revalidation against catalog contract (consumes `menu.updated` stub events), ETag concurrency.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `cart_v1` on).
+  - Four test levels green; dashboards + alerts live.
+- **Test criteria:**
+  - Cart ops p99 < 100 ms at 5k RPS; menu-change revalidation reflected < 5 s.
+- **Effort:** 1 week.
+
+### V-T8: Pricing & quotes slice
+- **Team:** Growth
+- **Decisions implemented:** D10
+- **Depends on:** S-T3, S-T5, S-T8
+- **Scope:** `pricing-promo` quote engine (items, fees, surge, promos, vouchers) via `POST /v1/quotes`; quotes in Redis (10-min TTL) HMAC-signed, PG persistence only at checkout; typed `fees[]`/`discounts[]` line items; consumes cart contract stubs.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env (flag `pricing_v1` on).
+  - Four test levels green (pricing math deterministically unit-tested); dashboards + alerts live; key-rotation runbook.
+- **Test criteria:**
+  - Tampered/expired quote ⇒ 422 on 100% of fixtures; quote p99 < 300 ms at 10k RPS.
+  - PG quote writes occur only at checkout (integration-test assertion).
+- **Effort:** 2 weeks.
+
+### V-T9: Checkout & order saga slice
+- **Team:** Marketplace
+- **Decisions implemented:** D22, D9
+- **Depends on:** S-T3, S-T5, S-T6, S-T8
+- **Scope:** `order` service: state machine (01 §4), saga orchestration against published payment/dispatch/pricing contracts + fakes, idempotent checkout (S-T3 lib), durable timer table + leased sweeper for `T_accept`/`T_dispatch`/capture-by, auto-remediation (PAYMENT_PENDING > 15 min ⇒ void + cancel), bulk-compensation APIs + admin-bff console; `POST /v1/orders`, cancel, get.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: checkout → (sim) payment → accept → deliver (flag `saga_v1` on).
+  - Four test levels green incl. every state-machine transition + compensation path; stuck-order SLO dashboard (< 0.05%/day) + alert; console live.
+- **Test criteria:**
+  - Kill all order pods with 1k pending timers ⇒ 100% fire within 60 s of due.
+  - Double "Pay" tap + BFF retry + Kafka redelivery fixture ⇒ exactly one order effect.
+  - Remediation fixture auto-voids in < 16 min, exactly once.
+- **Effort:** 2 weeks.
+
+### V-T10: Payment authorize/capture/refund slice
+- **Team:** Payments
+- **Decisions implemented:** D9
+- **Depends on:** S-T3, S-T5, S-T6, S-T7, S-T8
+- **Scope:** `payment` service against payment-sim (adapter interface, webhooks): authorize/capture/refund + wallet, publishing `payment.*`; PG-durable idempotency on every money mutation; consumes order contract stubs; refund console path via admin-bff.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: auth → capture → refund on payment-sim (flag `payment_v1` on).
+  - Four test levels green incl. decline/timeout/webhook-replay fixtures; dashboards (auth rate, failures) + alerts live.
+- **Test criteria:**
+  - Forced Redis failover during a 1.5× checkout storm ⇒ zero duplicate charges, zero lost orders.
+  - Webhook 10× replay ⇒ single state transition; authorize p99 < 500 ms vs sim.
+- **Effort:** 2 weeks.
+
+### V-T11: Merchant accept & order-queue slice
+- **Team:** Marketplace
+- **Decisions implemented:** D7, D11
+- **Depends on:** S-T5, S-T6, S-T8
+- **Scope:** Merchant incoming-order CQRS read model (sharded by `merchant_id`, projected from `order.*` stub events) + accept/reject via merchant-bff; kitchen-capacity admission tokens (default 30 accepts/10 min, merchant-tunable) inflating quoted prep ETA + busy badge instead of failing checkout; rebuild tooling.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: order appears in queue → accept → saga proceeds (flag `merchant_queue_v1` on).
+  - Four test levels green; freshness + admission dashboards; rebuild command executed once.
+- **Test criteria:**
+  - Queue freshness p99 < 2 s from `order.paid` at 1.5× peak; rebuild of largest cell < 1 h; projection parity 100% on 10k sampled orders.
+  - 50× flash-sale sim on one merchant ⇒ zero checkout 5xx; accept rate = configured capacity ± 5%.
+- **Effort:** 2 weeks.
+
+### V-T12: Dispatch & driver-offer slice
+- **Team:** Logistics
+- **Decisions implemented:** D13
+- **Depends on:** S-T5, S-T6, S-T7, S-T8
+- **Scope:** `dispatch` with zone-owned batch matching: H3-zone single-writer (Kafka partition per zone), 1–2 s tick, greedy-with-swaps, exclusive 10 s driver reservations before offers, deterministic logged snapshots; offer/accept via driver-bff; consumes location + order contract stubs and map-sim ETAs. No first-accept-wins 409 path.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: paid order → offer on driver-bff → accept → assigned (flag `dispatch_batch` on).
+  - Four test levels green incl. determinism harness; snapshot log queryable; dashboards + assignment-latency alert live.
+- **Test criteria:**
+  - Snapshot replay reproduces identical assignments 100%; assignment p95 < 5 s at 1.5× peak-city density.
+  - Offer-conflict rate < 0.5%; reservation leak rate 0 in a 24 h soak; sum-of-pickup-ETA ≥ 10% better than greedy baseline on the skewed dataset.
+- **Effort:** 2 weeks.
+
+### V-T13: Driver telemetry plane slice
+- **Team:** Location
+- **Decisions implemented:** D14, D15
+- **Depends on:** S-T3, S-T5, S-T7, S-T8
+- **Scope:** `location-gateway` (gRPC bidi streams, MQTT fallback, auth-once, 100 ms batching to telemetry topics), H3 res-7 Redis geo index (30 s TTL) with a published kNN read contract for dispatch, Flink 1:10 downsample → Iceberg, PG trip summaries only; driver-bff position-stream endpoint; driver-app protocol migration plan with kill-switch.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoint against fakes in the shared E2E env: simulated driver streams → kNN query returns them (flag `telemetry_v2` on).
+  - Four test levels green; ingest/connection/skew dashboards + alerts live; migration playbook published.
+- **Test criteria:**
+  - 300k msg/s sustained 1 h ⇒ gateway p99 < 5 ms, zero produce errors; 100k reconnect storm recovered < 60 s.
+  - kNN p99 < 10 ms at 200k writes/s; hottest H3 key < 2% of writes; PG location writes < 500/s per cell.
+- **Effort:** 2 weeks.
+
+### V-T14: Live tracking (realtime gateway) slice
+- **Team:** Location
+- **Decisions implemented:** D16
+- **Depends on:** S-T5, S-T8
+- **Scope:** Stateless WebSocket/SSE realtime gateway: per-order channels, 1 msg/3 s throttle, connection-count HPA, graceful drain + resume tokens; customer-bff `GET /v1/orders/{id}/tracking` returns gateway URL + channel token (10 s polling fallback kept); consumes telemetry contract stub events.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoint against fakes in the shared E2E env: live position updates on a simulated order (flag `tracking_push` on).
+  - Four test levels green; conns/pod dashboard + drain hooked into rollouts; SLO + `ownership.yaml`.
+- **Test criteria:**
+  - 2M synthetic connections held; fan-out 650k msg/s sustained.
+  - Rolling deploy ⇒ ≥ 99.9% clients resume < 5 s, zero message loss on active orders.
+- **Effort:** 2 weeks.
+
+### V-T15: Notifications slice
+- **Team:** Growth
+- **Decisions implemented:** D23
+- **Depends on:** S-T5, S-T6, S-T7, S-T8
+- **Scope:** `notification` service on priority-tiered topics (transactional > operational > marketing) with independent consumer groups, per-message-type staleness TTL gates at consume, APNs/FCM provider token buckets — delivered into notify-sink; preference endpoints via customer-bff; consumes order/dispatch/payment stub events.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: order event → push visible in notify-sink (flag `notify_tiers` on).
+  - Four test levels green; every message type declares its TTL in `contracts/`; per-tier lag dashboards + alerts.
+- **Test criteria:**
+  - 30-min pause + 1M backlog resume ⇒ ≥ 99% stale pushes dropped; live transactional p99 < 10 s throughout.
+  - Marketing burst ⇒ transactional p99 unchanged (isolation test).
+- **Effort:** 2 weeks.
+
+### V-T16: Campaign fan-out slice
+- **Team:** Growth
+- **Decisions implemented:** D23
+- **Depends on:** S-T5, S-T7, S-T8
+- **Scope:** Batch campaign pipeline (audience query → rate-shaped send into the marketing-tier contract) with campaign console via admin-bff and per-campaign rate caps; capacity-isolated from transactional consumers; sends land in notify-sink.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: console-created campaign delivers to notify-sink (flag `campaigns_v1` on).
+  - Four test levels green; rate-cap dashboards + alerts live.
+- **Test criteria:**
+  - 20M-recipient simulated campaign ⇒ transactional push p99 unchanged (± 10%); send rate within envelope 100% of the run.
+- **Effort:** 2 weeks.
+
+### V-T17: Ratings slice
+- **Team:** Growth
+- **Decisions implemented:** none (base blueprint, 01 §1)
+- **Depends on:** S-T5, S-T6, S-T8
+- **Scope:** `rating` service: rate-order endpoint via customer-bff, unlocked by `order.delivered` (stub events), publishes `rating.updated` per contract (search consumes it in its own slice).
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: delivered order → rating accepted → event published (flag `rating_v1` on).
+  - Four test levels green; dashboards + alerts live.
+- **Test criteria:**
+  - Rating before delivery ⇒ 409 on 100% of fixtures; duplicate rating ⇒ idempotent replay.
+  - Rate endpoint p99 < 200 ms at 1k RPS.
+- **Effort:** 1 week.
+
+### V-T18: Ledger slice
+- **Team:** Money Movement
+- **Decisions implemented:** D21
+- **Depends on:** S-T3, S-T5, S-T6, S-T8
+- **Scope:** Standalone append-only double-entry `ledger` service (hash-chained, day+cell partitions) with a published write API (payment/settlement integrate via contract); hourly invariant job (accounts sum to zero; captured − refunded = payables + commission); ledger views via admin-bff.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: simulated payment events post entries, invariants green (flag `ledger_v1` on).
+  - Four test levels green; hash-chain verification tool merged; invariant alert live; SLO + `ownership.yaml`.
+- **Test criteria:**
+  - 7-day soak at 1.5× volume ⇒ hourly invariants show zero drift; hash-chain verify passes.
+  - Ledger write p99 < 20 ms.
+- **Effort:** 2 weeks.
+
+### V-T19: Settlement, payouts & reconciliation slice
+- **Team:** Money Movement
+- **Decisions implemented:** D21
+- **Depends on:** S-T5, S-T6, S-T7, S-T8
+- **Scope:** `settlement` (merchant/driver payout accrual + payout runs, earnings via driver-bff/merchant-bff) and nightly T+1 recon: ingest PSP settlement files (generated by payment-sim), 3-way match (file ↔ ledger contract ↔ order events), break queue with 48 h SLA + console via admin-bff.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: delivered order → accrual → payout report → recon run (flag `settlement_v1` on).
+  - Four test levels green; auto-match ≥ 99.5% on prod-shape data; break-aging dashboard + SLA alert; finance runbook.
+- **Test criteria:**
+  - Seeded 0.5%-discrepancy dataset ⇒ 100% surfaced as breaks, zero silent; recon < 4 h for a 5M-order day.
+- **Effort:** 2 weeks.
+
+### V-T20: Risk & abuse slice
+- **Team:** Identity & Trust
+- **Decisions implemented:** D19
+- **Depends on:** S-T3, S-T5, S-T8
+- **Scope:** `risk` service scoring between quote and authorize (device fingerprint, velocity, promo-abuse graph, ML score; allow / 3DS step-up / deny — step-up branch published in the order contract), shipped shadow-first; edge abuse controls: endpoint-class token buckets (user/device/IP) + mobile device attestation, signals streamed to risk; case console via admin-bff.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: risky checkout fixture → step-up/deny observable (flag `risk_v1`; shadow and enforce modes both demoed).
+  - Four test levels green; abuse dashboards + alerts; retrain pipeline documented.
+- **Test criteria:**
+  - Scoring adds < 100 ms p99 to the saga; labeled fraud replay: recall ≥ 80% at ≤ 1% false-positive declines.
+  - Credential-stuffing sim (10k IPs) blocked ≥ 99% with < 0.1% legit impact; promo-farm sim flagged < 5 min.
+- **Effort:** 2 weeks.
+
+### V-T21: PCI capture & vault slice
+- **Team:** Payments
+- **Decisions implemented:** D18
+- **Depends on:** S-T5, S-T7, S-T8
+- **Scope:** PSP-hosted-fields card capture in apps/web (no PAN in our stack), isolated CDE account/VPC with `card-vault` (HSM-backed portable tokens) + network-token enrollment; payment-method management via customer-bff; PCI L1 evidence pack + QSA assessment scoped to the CDE.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: add card via hosted-fields sim → token → authorize on payment-sim (flag `vault_v1` on).
+  - Four test levels green; PAN scanner in CI; ROC issued with scope = CDE only.
+- **Test criteria:**
+  - Traffic scanner: zero PAN-shaped payloads outside PSP/CDE domains; tokenize/detokenize p99 < 10 ms.
+  - Vault outage sim ⇒ degrade to single-PSP mode, checkout availability ≥ 99.9%; segmentation pen test: zero PAN egress paths.
+- **Effort:** 2 weeks.
+
+### V-T22: Multi-PSP routing & auth-window slice
+- **Team:** Payments
+- **Decisions implemented:** D20
+- **Depends on:** S-T5, S-T7, S-T8
+- **Scope:** PSP router per (country, method) weighted by rolling auth-rate + fee with auto-failover (5-min error > 3× baseline or auth-rate −5 pts), templated adapter (2-week onboarding), exercised against two payment-sim instances; auth-window management: scheduled orders authorize T−30 min, re-auth job for aging auths, capture-by deadline metric + alert.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: checkout routed across two sims, failover demoed (flag `psp_routing` on).
+  - Four test levels green; per-PSP dashboards; failover drill executed; adapter template documented.
+- **Test criteria:**
+  - Primary-sim kill at 1.5× peak ⇒ auth-success dip < 2% for < 60 s, zero lost/duplicated payments; routing shift visible < 30 s.
+  - 24 h auth-window fixture ⇒ re-auth fires, capture succeeds; 7-day soak: zero captures on expired auths.
+- **Effort:** 2 weeks.
+
+### V-T23: Cells & global control plane slice
+- **Team:** Identity & Trust
+- **Decisions implemented:** D1, D3
+- **Depends on:** S-T1, S-T5, S-T8
+- **Scope:** `user-directory` (`user_id → home cell, jurisdiction`) replicated to every cell, config/flag replication, versioned cell routing-table distribution; directory lookups exposed to BFFs per contract. Async, last-write-wins.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: login fixture resolves its home cell via the directory (flag `directory_v1` on).
+  - Four test levels green; replication-lag dashboards + alerts; stale-tolerance failure-mode doc; SLO + `ownership.yaml`.
+- **Test criteria:**
+  - Cell-local lookup p99 < 10 ms; replication lag p99 < 5 s.
+  - Replication halted 10 min ⇒ stale-but-valid serving with zero errors.
+- **Effort:** 2 weeks.
+
+### V-T24: Edge routing & second-cell slice
+- **Team:** Compute/Delivery
+- **Decisions implemented:** D1, D2
+- **Depends on:** S-T1, S-T2, S-T8
+- **Scope:** Second full cell from IaC, GeoDNS/Anycast, edge cell-router (H3 res-5 / `city_id` → cell from the versioned routing-table contract, header override for tests), city cutover playbook rehearsed with one pilot city.
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoints against fakes in the shared E2E env: same request routed to different cells by geo header (flag `cell_router` on).
+  - Second cell passes smoke + E2E; pilot city cut over and rolled back per playbook; router dashboards live.
+- **Test criteria:**
+  - Cutover + rollback: order success ≥ baseline, zero flip-attributed failures.
+  - Router resolution p99 < 2 ms; wrong-cell rate < 0.01%.
+- **Effort:** 2 weeks.
+
+### V-T25: Per-cell Kafka & telemetry-cluster slice
+- **Team:** Data Platform
+- **Decisions implemented:** D5
+- **Depends on:** S-T1, S-T5, S-T6
+- **Scope:** Per-cell transactional Kafka clusters keyed by `aggregate_id` (dual-publish migration per D30 off `region:aggregate_id`), separate quota-capped telemetry cluster, MM2 restricted to directory/analytics/DR topics; partition counts from the capacity-model contract.
+- **Definition of Done:**
+  - Demo-able end-to-end via the checkout BFF flow against fakes in the shared E2E env running entirely on the new clusters.
+  - Migration complete with deprecation dates on old topics; quotas live; partition derivation in `contracts/`; cluster dashboards + alerts.
+- **Test criteria:**
+  - Telemetry flood at 2× design (600k msg/s sim) ⇒ transactional publish p99 < 20 ms, unchanged.
+  - Per-aggregate ordering property test green across the key migration.
+- **Effort:** 2 weeks.
+
+### V-T26: Orders sharding slice
+- **Team:** Marketplace
+- **Decisions implemented:** D6
+- **Depends on:** S-T4, S-T8
+- **Scope:** `orders`/`order_events`/outbox onto 256 logical / 4 physical shards by `hash(customer_id)`: dual-write → backfill → verify → flag-gated cutover; cross-shard queries removed (lint rule); includes one 4→8 online remap drill in staging with a timed runbook.
+- **Definition of Done:**
+  - Demo-able end-to-end via the checkout BFF flow against fakes in the shared E2E env on the sharded store (flag `orders_sharded` on).
+  - Parity report published; rollback rehearsed; per-shard dashboards; drill runbook + quarterly calendar.
+- **Test criteria:**
+  - Checksum parity 100%; cutover window zero 5xx on order APIs; per-shard writes < 100/s at 1.5×; checkout p99 < 800 ms.
+  - Remap drill: zero misroutes/write errors at 1× load, total < 4 h.
+- **Effort:** 2 weeks.
+
+### V-T27: Payments & ledger sharding slice
+- **Team:** Payments
+- **Decisions implemented:** D6
+- **Depends on:** S-T4, S-T8
+- **Scope:** Payment + ledger-accrual tables onto shards by `hash(order_id)` via the same dual-write/backfill/verify/cutover pattern; cross-shard invariant checks wired.
+- **Definition of Done:**
+  - Demo-able end-to-end via the checkout/capture BFF flow against fakes in the shared E2E env on sharded stores (flag `payments_sharded` on).
+  - Parity report; rollback rehearsed; per-shard dashboards + invariant alerts.
+- **Test criteria:**
+  - Parity 100%; zero failed or duplicated payments during cutover (ledger scan).
+  - 7-day soak: hourly cross-shard invariants hold.
+- **Effort:** 2 weeks.
+
+### V-T28: Event tiering & replay slice
+- **Team:** Data Platform
+- **Decisions implemented:** D8
+- **Depends on:** S-T6, S-T8
+- **Scope:** CDC `order_events` → Iceberg/Parquet; PG keeps 30-day daily partitions (auto-drop); dual-store replayer library (PG + S3 behind one interface) with an order-replay endpoint via admin-bff; Kafka tiered storage (7 d hot / 90 d).
+- **Definition of Done:**
+  - Demo-able end-to-end via its BFF endpoint against fakes in the shared E2E env: replay an aged order from the lake (flag `event_tiering` on).
+  - Pipeline live; partitions auto-drop; lake tables documented; tiering-lag dashboard + alert.
+- **Test criteria:**
+  - 6-month-old-order replay byte-identical to the golden fixture; tiering lag p99 < 15 min.
+  - PG storage plateaus over a 45-day soak.
+- **Effort:** 2 weeks.
+
+### V-T29: Purpose-scoped Redis slice
+- **Team:** Storage/DB
+- **Decisions implemented:** D9, D15
+- **Depends on:** S-T1, S-T3
+- **Scope:** Split shared Redis into per-cell geo / sessions / cache clusters with fit-for-purpose persistence + eviction; repoint clients via config; decommission the shared instance.
+- **Definition of Done:**
+  - Demo-able end-to-end via the checkout + tracking BFF flows against fakes in the shared E2E env on the split clusters.
+  - Three clusters live per cell; old cluster gone; per-cluster dashboards + policies documented.
+- **Test criteria:**
+  - Cache FLUSHALL under 1.5× load ⇒ error rate < 0.1%, zero correctness violations (idempotency + money invariants green).
+  - Session failover ⇒ forced re-auth for < 5% of active sessions.
+- **Effort:** 2 weeks.
+
+### V-T30: Load-shed ladder & waiting-room slice
+- **Team:** SRE/Observability
+- **Decisions implemented:** D12
+- **Depends on:** S-T3, S-T8
+- **Scope:** Per-cell overload controller with flag-driven L1–L4 (static ranking → cached feed → checkout waiting room with shown ETA → pause signups), waiting-room service, BFF hooks for all levels — exercised against ranking/cache/checkout contract stubs.
+- **Definition of Done:**
+  - Demo-able end-to-end via the browse + checkout BFF flows against fakes in the shared E2E env with each ladder level forced (flags `shed_l1..l4`).
+  - Four test levels green; ladder-state dashboard; drill runbook.
+- **Test criteria:**
+  - 8× city-spike sim ⇒ levels engage in order at thresholds; checkout availability ≥ 99.9% for admitted users.
+  - De-escalation without flapping (hysteresis verified over 3 cycles).
+- **Effort:** 2 weeks.
+
+### V-T31: Capacity model & load-harness slice
+- **Team:** SRE/Observability
+- **Decisions implemented:** D24
+- **Depends on:** S-T2, S-T7
+- **Scope:** `capacity-model.yaml` (every 05 §4 dimension, versioned, with derivation doc) + CI job diffing latest load results against it; k6 harness driving 1.5× model numbers at any `BASE_URL`; spatially skewed golden datasets `load-peak-city` and `load-500k-drivers`.
+- **Definition of Done:**
+  - Demo-able end-to-end via the browse/checkout BFF flows against fakes in the shared E2E env under harness load.
+  - Model + CI job live on `main`; datasets versioned in `scenarios/`; harness reads targets from the model.
+- **Test criteria:**
+  - Fixture result 10% below model ⇒ CI red; baseline ⇒ green.
+  - Harness sustains 1.5× largest-cell edge RPS (90k) for 30 min with generator error < 0.01%; skew assertion: top H3 zone ≥ 30% of orders, top merchant ≥ 5%.
+- **Effort:** 2 weeks.
+
+### V-T32: Perf cell, driver simulator & shadow-traffic slice
+- **Team:** Compute/Delivery
+- **Decisions implemented:** D24
+- **Depends on:** S-T1, S-T2, S-T7
+- **Scope:** Standing prod-scale perf cell from the same IaC (scale-down between runs), 500k-stream driver simulator with adaptive-sampling profiles + reconnect storms, sampled prod-read shadow mirroring (PII-tokenized) to canaries/perf cell; monthly scheduled run archiving results for the capacity CI; load-pass wired into the growth-launch checklist.
+- **Definition of Done:**
+  - Demo-able end-to-end via the tracking BFF flow against fakes in the shared E2E env fed by the simulator.
+  - Perf cell live with monthly run + result archival; simulator in `tools/`; mirroring live with privacy review recorded; launch gate documented.
+- **Test criteria:**
+  - Simulator sustains 300k msg/s for 1 h with < 0.1% stream drops; 100k reconnect storm recovered < 60 s.
+  - Mirroring adds < 0.1% prod latency overhead; seeded +20% canary regression caught by shadow comparison; perf-cell idle cost ≤ 20% of run cost.
+- **Effort:** 2 weeks.
+
+### V-T33: DR replication slice
+- **Team:** Storage/DB
+- **Decisions implemented:** D25
+- **Depends on:** S-T1, S-T6
+- **Scope:** Tier-0 warm standby to paired cells: PG logical replication per shard, MM2 shadow topics, S3 CRR; lag monitoring; standby sizing per the capacity-model contract; weekly automated read-only promotion dry-run.
+- **Definition of Done:**
+  - Demo-able end-to-end via the order-detail BFF flow against fakes in the shared E2E env, read from a promoted-standby copy (dry-run mode).
+  - All Tier-0 stores replicating for two cell pairs; lag SLO dashboards + alerts; sizing documented.
+- **Test criteria:**
+  - Replication lag p99 < 5 s at 1.5× peak.
+  - Weekly promotion dry-run passes consistency checks 4 consecutive weeks.
+- **Effort:** 2 weeks.
+
+### V-T34: DR re-homing & recovery slice
+- **Team:** Compute/Delivery
+- **Decisions implemented:** D25, D7
+- **Depends on:** S-T1, S-T5, S-T8
+- **Scope:** Scripted city re-homing (routing-table flip + directory update + replica promotion + DNS) with dry-run, abort path, approvals; in-flight order recovery (saga resume from replicated events, PSP webhook replay via payment-sim, client re-sync in BFF contracts); Tier-1 rebuild-from-events automation (search index, merchant-queue projection, ops index) targeting < 1 h.
+- **Definition of Done:**
+  - Demo-able end-to-end via the order BFF flows against fakes in the shared E2E env: evacuation drill with live simulated orders completes on the paired cell.
+  - Tool merged with dry-run + abort; rebuild automation + progress dashboard; timed runbooks published.
+- **Test criteria:**
+  - Staging evacuation RTO < 15 min; dry-run emits a full plan with zero mutations; mid-flight abort leaves a verified-consistent state.
+  - 1k in-flight-orders drill ⇒ 100% reach terminal state, zero duplicate charges, zero lost payments; largest-cell index rebuild < 60 min, projection parity 100% on 10k aggregates.
+- **Effort:** 2 weeks.
+
+### V-T35: Chaos program slice
+- **Team:** SRE/Observability
+- **Decisions implemented:** D26, D12, D13
+- **Depends on:** S-T2, S-T7, S-T8
+- **Scope:** The recurring chaos suite against the shared E2E/perf environments under synthetic peak: weekly forced Redis failover during checkout storm + PG primary failover with automated money-invariant assertions, brownout injection (+500 ms on identity/pricing), monthly AZ kill, monthly "monsoon" 8× city-spike drill (demand surge + driver-supply drop) with scorecard, quarterly production cell-evacuation game day with published RTO/RPO.
+- **Definition of Done:**
+  - Demo-able end-to-end via the checkout BFF flow against fakes in the shared E2E env while a chaos scenario runs (invariants green).
+  - Suite scheduled (weekly/monthly/quarterly); assertions automated; results feed the capacity CI; escalation path + scorecard template published.
+- **Test criteria:**
+  - Every run: zero duplicate charges, zero lost orders; PG failover write-unavailability < 30 s; brownout: checkout p99 < 800 ms with shed active.
+  - Monsoon: shed engages < 60 s of breach, dispatch p95 < 5 s in batch mode; game day: RTO ≤ 15 min, RPO ≤ 5 s.
+- **Effort:** 2 weeks.
+
+### V-T36: Observability diet slice
+- **Team:** SRE/Observability
+- **Decisions implemented:** D27
+- **Depends on:** S-T3
+- **Scope:** 1–5% INFO sampling on read paths (exemplar-linked) via `libs/logging` route classes, full logging for mutations/errors/WARN+/payment/dispatch, tiered retention 3 d hot → 30 d object storage → drop, observability cost dashboard.
+- **Definition of Done:**
+  - Demo-able end-to-end via any BFF flow against fakes in the shared E2E env: an error `trace_id` resolves across every hop while read-path INFO is sampled.
+  - Sampling live fleet-wide; retention policies applied; log-schema tests updated.
+- **Test criteria:**
+  - Indexed volume < 60k lines/s at peak (from ~600k raw); 100% of error `trace_id`s resolve end-to-end.
+  - Observability spend ≥ 60% below the unsampled baseline month.
+- **Effort:** 2 weeks.
+
+### V-T37: FinOps slice
+- **Team:** SRE/Observability
+- **Decisions implemented:** D27, D28
+- **Depends on:** S-T1, S-T2
+- **Scope:** $/order pipeline (CUR + Kubecost → per-team dashboards beside SLOs, < 24 h lag, budgets against the $0.015/order envelope, 80% alerts), complete CI-enforced `ownership.yaml` (services, topics, dashboards, alerts, budget lines), ≥ 60% stateless compute on spot with PDB-safe eviction, storage lifecycle (Kafka tiered, S3 30 d IA / 180 d Glacier), observability ingest quotas.
+- **Definition of Done:**
+  - Demo-able end-to-end via the admin-bff cost views against fakes in the shared E2E env.
+  - $/order dashboard live; `ownership.yaml` complete with CI enforcement; spot node groups + lifecycle policies applied; monthly review ritual documented with finance.
+- **Test criteria:**
+  - Unowned-resource fixture ⇒ CI red; seeded 85% burn ⇒ budget alert; $/order reconciles with finance ± 5%.
+  - Forced 20% spot eviction at peak ⇒ zero SLO breach; 30-day storage cost trend flattens.
+- **Effort:** 2 weeks.
+
+---
+
+## D1–D30 coverage map
+
+| Decision | Implemented by |
+|---|---|
+| D1 | V-T23, V-T24 |
+| D2 | V-T24 |
+| D3 | V-T2, V-T23 |
+| D4 | V-T1 |
+| D5 | V-T25 |
+| D6 | S-T4, V-T26, V-T27 |
+| D7 | V-T11, V-T34 |
+| D8 | S-T6, V-T28 |
+| D9 | S-T3, V-T10, V-T29 |
+| D10 | V-T8 |
+| D11 | V-T4, V-T6, V-T11 |
+| D12 | V-T30, V-T35 |
+| D13 | V-T12, V-T35 |
+| D14 | V-T13 |
+| D15 | V-T13, V-T29 |
+| D16 | V-T14 |
+| D17 | V-T4, V-T5, V-T6 |
+| D18 | V-T21 |
+| D19 | V-T20 |
+| D20 | V-T22 |
+| D21 | V-T18, V-T19 |
+| D22 | S-T6, V-T9 |
+| D23 | V-T15, V-T16 |
+| D24 | V-T31, V-T32 |
+| D25 | V-T33, V-T34 |
+| D26 | V-T35 |
+| D27 | V-T36, V-T37 |
+| D28 | V-T37 |
+| D29 | S-T2 |
+| D30 | S-T5 |
+
+**Task count: 45** — 8 ordered setup tasks (S-T1…S-T8) + 37 parallel fullstack
+slices (V-T1…V-T37). Every V-task depends only on S-tasks; slices integrate
+via versioned contracts + fakes and converge continuously in the shared E2E
+env (S-T8). Acceptance: the platform meets the 05 §1 design point when every
+slice's test criteria pass at 1.5× the capacity model and the quarterly game
+day (V-T35) hits its RTO/RPO targets.
