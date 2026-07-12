@@ -686,6 +686,62 @@ else
   fi
 fi
 
+# --- V-T11 merchant accept & order-queue (D7/D11): the incoming-order CQRS read
+# model (projected from order.*, sharded by merchant_id) + accept that DRIVES THE
+# SAGA, admission-gated by kitchen capacity (busy badge + inflated ETA, NOT a
+# checkout failure). GATED on merchant-queue AND order being real (the accept
+# drives the real order saga). Proves: order.paid -> order appears in the merchant
+# incoming queue -> accept via the BFF verb -> the order saga proceeds
+# (order.accepted); plus a busy-badge/admission assertion (at capacity the accept
+# is DEFERRED 200 with a busy badge, never a 5xx; the queue path never 5xx). ---
+echo "== V-T11 merchant queue (order.paid -> queue -> accept -> saga proceeds + busy-badge admission, via merchant-queue behind merchant_queue_v1) =="
+MQ_MODE="$(awk -F'\t' '$1=="merchant-queue"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+ORDER_MODE_MQ="$(awk -F'\t' '$1=="order"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$MQ_MODE" != "real" ] || [ "$ORDER_MODE_MQ" != "real" ]; then
+  echo "  SKIP: merchant-queue='$MQ_MODE' order='$ORDER_MODE_MQ' — V-T11 runs only when BOTH merchant-queue and order are the real slots"
+else
+  MQMID="mer_e2e_mq_$$"
+  MQK="idem_mq_$$"
+  MQBODY='{"quote_id":"qot_mq","payment_method_id":"pm_mq","merchant_id":"'"$MQMID"'","total":{"amount":42550,"currency":"THB"}}'
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # 1. checkout a REAL order -> PAYMENT_PENDING (via the order slot).
+  MOC="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders" -H 'Content-Type: application/json' -H "Idempotency-Key: $MQK" -d "$MQBODY" 2>/dev/null)"
+  MOID="$(printf '%s' "$MOC" | sed -n 's/.*"order_id":"\([^"]*\)".*/\1/p')"
+  if [ -n "$MOID" ]; then pass "V-T11 checkout minted order $MOID"; else bad "V-T11 checkout failed (${MOC:0:160})"; fi
+  # 2. drive it to PAID in the order service (payment.authorized -> order.paid).
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/order/v1/order-events" -H 'Content-Type: application/json' \
+    -d '{"event_id":"evt_mq_auth_'"$$"'","event_type":"payment.authorized","occurred_at":"'"$NOW"'","trace_id":"t_e2e","aggregate":{"type":"order","id":"'"$MOID"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$MOID"'"}}'
+  if [[ "$(curl -s --max-time 8 "$GW/order/v1/orders/$MOID")" == *'"status":"PAID"'* ]]; then pass "order driven to PAID"; else bad "order not PAID before queue projection"; fi
+  # 3. project order.paid (carrying merchant_id, additive D30) into the merchant
+  #    queue — the checkout/queue path must return 202, never 5xx.
+  QP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/merchant-queue/v1/order-events" -H 'Content-Type: application/json' \
+    -d '{"event_id":"evt_mq_paid_'"$$"'","event_type":"order.paid","occurred_at":"'"$NOW"'","trace_id":"t_e2e","aggregate":{"type":"order","id":"'"$MOID"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$MOID"'","merchant_id":"'"$MQMID"'","total":{"amount":42550,"currency":"THB"},"paid_at":"'"$NOW"'"}}' 2>/dev/null)"
+  if [ "$QP" = 202 ]; then pass "order.paid projected into the queue (202, queue path never 5xx)"; else bad "queue projection -> $QP (want 202)"; fi
+  # 4. the order APPEARS in the merchant's incoming queue as PENDING (freshness).
+  assert_body "order appears in the merchant incoming queue" GET "/merchant-queue/v1/merchant/orders?merchant_id=$MQMID" "\"order_id\":\"$MOID\""
+  assert_body "queue entry is PENDING (awaiting merchant accept)" GET "/merchant-queue/v1/merchant/orders/$MOID" '"queue_state":"PENDING"'
+  # 5. ACCEPT via the merchant-bff verb -> ACCEPTED, and the order saga PROCEEDS.
+  MACC="$(curl -s --max-time 8 -X POST "$GW/merchant-queue/v1/merchant/orders/$MOID:accept" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  if [[ "$MACC" == *'"status":"ACCEPTED"'* ]]; then pass "merchant accept -> ACCEPTED (via merchant-queue, admission-gated)"; else bad "accept failed (${MACC:0:160})"; fi
+  if [[ "$(curl -s --max-time 8 "$GW/order/v1/orders/$MOID")" == *'"status":"ACCEPTED"'* ]]; then pass "accept DROVE THE SAGA forward (order ACCEPTED, order.accepted emitted)"; else bad "order saga did not proceed to ACCEPTED"; fi
+  # 6. BUSY-BADGE ADMISSION: tune this merchant's capacity down to 1 (it already
+  #    spent its 1 token on the accept above), project a NEW paid order, and try to
+  #    accept it -> the kitchen is at capacity, so the accept is DEFERRED with a
+  #    busy badge + inflated ETA (HTTP 200, NOT a 5xx). Checkout never fails.
+  curl -s -o /dev/null --max-time 8 -X PUT "$GW/merchant-queue/v1/merchant/$MQMID/capacity" -H 'Content-Type: application/json' -d '{"accepts_per_window":1,"window_minutes":10}'
+  BOID="ord_mq_busy_$$"
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/merchant-queue/v1/order-events" -H 'Content-Type: application/json' \
+    -d '{"event_id":"evt_mq_busy_'"$$"'","event_type":"order.paid","occurred_at":"'"$NOW"'","trace_id":"t","aggregate":{"type":"order","id":"'"$BOID"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$BOID"'","merchant_id":"'"$MQMID"'","total":{"amount":1000,"currency":"THB"},"paid_at":"'"$NOW"'"}}'
+  BCB="$(curl -s -w '\n%{http_code}' --max-time 8 -X POST "$GW/merchant-queue/v1/merchant/orders/$BOID:accept" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  BCODE="$(printf '%s' "$BCB" | tail -n1)"; BBODY="$(printf '%s' "$BCB" | sed '$d')"
+  if [ "$BCODE" -lt 500 ] 2>/dev/null && [[ "$BBODY" == *'"busy":true'* ]] && [[ "$BBODY" == *'"status":"PENDING"'* ]]; then
+    pass "at capacity: accept DEFERRED with a busy badge (HTTP $BCODE, status PENDING, ETA inflated) — checkout not failed"
+  else
+    bad "busy-badge admission wrong (code=$BCODE body=${BBODY:0:160})"
+  fi
+  assert_body "busy badge shown on the capacity endpoint" GET "/merchant-queue/v1/merchant/$MQMID/capacity" '"busy":true'
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

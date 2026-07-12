@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf render-feed-cache render-cart render-pricing render-order render-payment e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf test-merchant-queue-perf render-feed-cache render-cart render-pricing render-order render-payment render-merchant-queue rebuild-merchant-queue e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -148,6 +148,12 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@cd services/payment && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@echo "== V-T10 perf criteria (no -race): authorize p99<500ms vs sim =="
 	@$(MAKE) --no-print-directory test-payment-perf
+	@echo "== V-T11 merchant accept & order-queue (D7/D11, -race): CQRS projection from order.* (exactly-once inbox + LWW) sharded by merchant_id + 10k projection parity (100%) + full/largest-cell rebuild-from-log parity + 50x flash-sale (zero checkout 5xx, accept rate = capacity ±5%, busy badge) + merchant-tunable capacity + accept->saga + event/HTTP contract-conformant + flag =="
+	@cd services/merchant-queue && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T11 perf criteria (no -race): queue freshness (order.paid->visible) p99<2s =="
+	@$(MAKE) --no-print-directory test-merchant-queue-perf
+	@echo "== V-T11 rebuild tooling executed once (largest cell + full store rebuilt from the event log, 100% parity) =="
+	@$(MAKE) --no-print-directory rebuild-merchant-queue
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -249,6 +255,12 @@ test-cart-perf: ## V-T7: cart perf criteria (no -race): add/get/remove p99<100ms
 test-order-perf: ## V-T9: order perf criteria (no -race): checkout p99<800ms
 	@cd services/order && $(GO) test -count=1 -run TestPerf ./...
 
+test-merchant-queue-perf: ## V-T11: merchant-queue perf criteria (no -race): queue freshness p99<2s
+	@cd services/merchant-queue && $(GO) test -count=1 -run TestPerf ./...
+
+rebuild-merchant-queue: ## V-T11: run the D7 rebuild-from-events tool once (seed 10k orders, rebuild the largest cell + full store from the log, assert 100% parity, print wall time)
+	@cd services/merchant-queue && $(GO) run . -rebuild-demo -n 10000
+
 test-payment-perf: ## V-T10: payment perf criteria (no -race): authorize p99<500ms vs sim
 	@cd services/payment && $(GO) test -count=1 -run TestPerf ./...
 
@@ -296,6 +308,16 @@ render-order: ## V-T9: render the order base (Deployment+Service) + lint the stu
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/order.yaml && $(GO) run . $$root/deploy/dashboards/order.json ); \
 	  echo "render-order: order base (Deployment+Service) + stuck-order SLO/timer-fire/DLQ alerts + dashboard rendered/parsed"
+
+render-merchant-queue: ## V-T11: render the merchant-queue base (Deployment+Service) + lint the freshness/parity/admission/checkout-5xx alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-merchant-queue.yaml; \
+	  $(KUSTOMIZE) build deploy/base/merchant-queue > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: merchant-queue' $$f || { echo "render-merchant-queue: merchant-queue Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-merchant-queue: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/merchant-queue.yaml && $(GO) run . $$root/deploy/dashboards/merchant-queue.json ); \
+	  echo "render-merchant-queue: merchant-queue base (Deployment+Service) + freshness/parity/admission/checkout-5xx alerts + dashboard rendered/parsed"
 
 render-payment: ## V-T10: render the payment base (Deployment+Service) + lint the auth-rate/failure/duplicate-charge SLO alerts + dashboard
 	@set -e; root=$$PWD; f=$$root/.render-payment.yaml; \

@@ -226,7 +226,9 @@ func domainEventFor(o OrderRow, to State, now time.Time) (string, map[string]any
 	total := map[string]any{"amount": o.Total.Amount, "currency": o.Total.Currency}
 	switch to {
 	case StatePaid:
-		return "order.paid", map[string]any{"order_id": o.OrderID, "payment_id": o.AuthID, "total": total, "paid_at": ts}
+		// merchant_id is additive on order.paid/v1 (D30) so the V-T11 merchant-queue
+		// read model can shard the paid order by merchant_id into its incoming queue.
+		return "order.paid", map[string]any{"order_id": o.OrderID, "payment_id": o.AuthID, "merchant_id": o.MerchantID, "total": total, "paid_at": ts}
 	case StateAccepted:
 		return "order.accepted", map[string]any{"order_id": o.OrderID, "merchant_id": o.MerchantID, "accepted_at": ts}
 	case StateDispatched:

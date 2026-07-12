@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: merchant-queue
+  labels:
+    app: merchant-queue
+    shop.io/team: marketplace
+spec:
+  selector:
+    app: merchant-queue
+  ports:
+    - name: http
+      port: 8117
+      targetPort: 8117
