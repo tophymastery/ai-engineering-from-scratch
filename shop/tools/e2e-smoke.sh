@@ -742,6 +742,91 @@ else
   assert_body "busy badge shown on the capacity endpoint" GET "/merchant-queue/v1/merchant/$MQMID/capacity" '"busy":true'
 fi
 
+# --- V-T12 dispatch & driver-offer (D13): zone-owned batch matching with exclusive
+# 10s driver reservations before offers (NO first-accept-wins 409), deterministic
+# logged snapshots, offer/accept via the driver BFF. GATED on the dispatch slot
+# being REAL (process-mode). Proves the DoD: a paid order becomes a WAITING order
+# in its zone -> a batch tick reserves a driver + emits an OFFER -> the driver sees
+# the offer ON THE DRIVER-BFF -> accepts -> ASSIGNED (behind dispatch_batch); plus a
+# reservation/no-409 assertion (re-accept is idempotent 200, never a 409; the
+# reservation-leak rate is 0) and the queryable snapshot log. When order is ALSO
+# real the accept drives the saga (order ACCEPTED -> DISPATCHED). ---
+echo "== V-T12 dispatch (paid order -> batch offer on driver-bff -> accept -> assigned + exclusive reservations/no-409 + snapshot log, via the real dispatch service behind dispatch_batch) =="
+DISPATCH_MODE="$(awk -F'\t' '$1=="dispatch"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$DISPATCH_MODE" != "real" ]; then
+  echo "  SKIP: dispatch slot mode='$DISPATCH_MODE' (not real) — V-T12 deep section runs only when dispatch is the real slot"
+else
+  DORD="ord_vt12_$$"
+  DDRV="drv_vt12_$$"
+  NOWD="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # 1. register a driver's location (availability) — the location contract stub.
+  DLC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/dispatch/v1/drivers:location" -H 'Content-Type: application/json' \
+    -d '{"driver_id":"'"$DDRV"'","lat":13.7520,"lng":100.5020}' 2>/dev/null)"
+  if [ "$DLC" = 202 ]; then pass "driver location registered (available in zone)"; else bad "driver location -> $DLC (want 202)"; fi
+  # 2. a PAID order becomes a WAITING order in its zone (order.paid needs-dispatch
+  #    signal, carrying an explicit pickup).
+  DIP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/dispatch/v1/order-events" -H 'Content-Type: application/json' \
+    -d '{"event_id":"evt_vt12_paid_'"$$"'","event_type":"order.paid","occurred_at":"'"$NOWD"'","trace_id":"t_e2e","aggregate":{"type":"order","id":"'"$DORD"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$DORD"'","merchant_id":"mer_vt12","pickup":{"lat":13.7500,"lng":100.5000},"paid_at":"'"$NOWD"'"}}' 2>/dev/null)"
+  if [ "$DIP" = 202 ]; then pass "order.paid projected (order waiting in its zone)"; else bad "order.paid inject -> $DIP (want 202)"; fi
+  # 3. force a batch tick — reserves the driver + emits an offer.
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/dispatch/v1/tick" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1
+  # 4. the driver sees the OFFER on the driver BFF (gateway passthrough -> dispatch).
+  OFR=""
+  for _ in 1 2 3 4 5; do
+    OFR="$(curl -s --max-time 8 "$GW/driver-bff/v1/driver/offers?driver_id=$DDRV" 2>/dev/null)"
+    [[ "$OFR" == *"$DORD"* ]] && break
+    curl -s -o /dev/null --max-time 8 -X POST "$GW/dispatch/v1/tick" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1
+    sleep 0.3
+  done
+  if [[ "$OFR" == *"$DORD"* ]] && [[ "$OFR" == *"$DDRV"* ]]; then pass "driver sees the batch OFFER on the driver-bff (order $DORD reserved to $DDRV)"; else bad "no offer on driver-bff (${OFR:0:160})"; fi
+  # 5. accept via the driver BFF :accept verb -> ASSIGNED (no 409 race).
+  ACC="$(curl -s --max-time 8 -X POST "$GW/driver-bff/v1/driver/offers/$DORD:accept" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  if [[ "$ACC" == *'"status":"ASSIGNED"'* ]] && [[ "$ACC" == *"$DDRV"* ]]; then pass "driver accept -> ASSIGNED to $DDRV (via driver-bff, behind dispatch_batch)"; else bad "accept failed (${ACC:0:160})"; fi
+  # 6. assignment status is ASSIGNED.
+  assert_body "assignment status is ASSIGNED" GET "/dispatch/v1/assignments/$DORD" '"status":"ASSIGNED"'
+  # 7. NO first-accept-wins 409: a re-accept of the same order is idempotent 200,
+  #    NEVER a 409 — the exclusive reservation prevents conflict.
+  RC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/driver-bff/v1/driver/offers/$DORD:accept" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  if [ "$RC" = 200 ]; then pass "re-accept is idempotent 200 (no first-accept-wins 409 path)"; else bad "re-accept -> $RC (want 200, must NOT be 409)"; fi
+  # 8. reservation-leak rate is 0 (exclusive reservations, all consumed/released).
+  assert_body "reservation-leak rate is 0" GET "/dispatch/v1/admin/reservations" '"leak_rate":0'
+  # 9. the deterministic snapshot log is queryable (batch is explainable/replayable).
+  assert_body "snapshot log queryable (deterministic batch snapshots)" GET "/dispatch/v1/admin/snapshots?limit=5" '"snapshots"'
+  # 10. S-T8 compat path still returns 201 ASSIGNED (batch-of-one immediate assign).
+  assert_status "dispatch assign (S-T8 compat)" POST /dispatch/v1/assignments 201 '{"order_id":"ord_vt12_compat_'"$$"'"}'
+
+  # 11. When order is ALSO real, the accept DRIVES THE SAGA: a real order taken to
+  #     ACCEPTED, then dispatched, reaches DISPATCHED (dispatch.assigned -> order).
+  ORDER_MODE_D="$(awk -F'\t' '$1=="order"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+  if [ "$ORDER_MODE_D" = real ]; then
+    DK="idem_vt12_$$"
+    DOC="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders" -H 'Content-Type: application/json' -H "Idempotency-Key: $DK" -d '{"quote_id":"qot_vt12","payment_method_id":"pm_vt12","total":{"amount":42550,"currency":"THB"}}' 2>/dev/null)"
+    ROID="$(printf '%s' "$DOC" | sed -n 's/.*"order_id":"\([^"]*\)".*/\1/p')"
+    # drive to ACCEPTED: payment.authorized -> PAID, then merchant accept.
+    curl -s -o /dev/null --max-time 8 -X POST "$GW/order/v1/order-events" -H 'Content-Type: application/json' \
+      -d '{"event_id":"evt_vt12_auth_'"$$"'","event_type":"payment.authorized","occurred_at":"'"$NOWD"'","trace_id":"t","aggregate":{"type":"order","id":"'"$ROID"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$ROID"'"}}' >/dev/null 2>&1
+    curl -s -o /dev/null --max-time 8 -X POST "$GW/order/v1/orders/$ROID:accept" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1
+    # register a driver + dispatch the real order, then accept on the driver-bff.
+    curl -s -o /dev/null --max-time 8 -X POST "$GW/dispatch/v1/drivers:location" -H 'Content-Type: application/json' -d '{"driver_id":"'"$DDRV"'_2","lat":13.7521,"lng":100.5021}' >/dev/null 2>&1
+    curl -s -o /dev/null --max-time 8 -X POST "$GW/dispatch/v1/order-events" -H 'Content-Type: application/json' \
+      -d '{"event_id":"evt_vt12_rpaid_'"$$"'","event_type":"order.paid","occurred_at":"'"$NOWD"'","trace_id":"t","aggregate":{"type":"order","id":"'"$ROID"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$ROID"'","merchant_id":"mer_vt12","pickup":{"lat":13.7501,"lng":100.5001},"paid_at":"'"$NOWD"'"}}' >/dev/null 2>&1
+    for _ in 1 2 3 4 5; do
+      curl -s -o /dev/null --max-time 8 -X POST "$GW/dispatch/v1/tick" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1
+      OFR2="$(curl -s --max-time 8 "$GW/driver-bff/v1/driver/offers?driver_id=${DDRV}_2" 2>/dev/null)"
+      [[ "$OFR2" == *"$ROID"* ]] && break
+      sleep 0.3
+    done
+    curl -s -o /dev/null --max-time 8 -X POST "$GW/driver-bff/v1/driver/offers/$ROID:accept" -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1
+    DSTATE=""
+    for _ in 1 2 3 4 5; do
+      DSTATE="$(curl -s --max-time 8 "$GW/order/v1/orders/$ROID" 2>/dev/null)"
+      [[ "$DSTATE" == *'"status":"DISPATCHED"'* ]] && break
+      sleep 0.3
+    done
+    if [[ "$DSTATE" == *'"status":"DISPATCHED"'* ]]; then pass "dispatch accept DROVE THE SAGA (order $ROID -> DISPATCHED via dispatch.assigned)"; else bad "order not DISPATCHED after dispatch accept (${DSTATE:0:120})"; fi
+  fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

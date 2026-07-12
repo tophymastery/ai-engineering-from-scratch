@@ -1,0 +1,96 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T12 Dispatch & driver-offer slice (Logistics team; D13 zone-owned batch matching). Panels bind to the metrics dispatch exports (also driving deploy/alerts/dispatch.yaml): assignment latency p95 (< 5s SLO), per-zone tick duration (1-2s), offer-conflict rate (< 0.5%), reservation-leak count (= 0), deterministic snapshot-replay mismatches (= 0), batch-quality ETA improvement vs greedy baseline (>= 10%), waiting orders + available drivers per zone, and inbox DLQ depth. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Dispatch — zone-owned batch matching + driver offers (V-T12)",
+  "uid": "dispatch-v-t12",
+  "tags": ["logistics", "dispatch", "batch-matching", "h3-zone", "reservations", "determinism", "V-T12"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "zone", "type": "query", "query": "label_values(dispatch_waiting_orders, zone)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Assignment latency p95 (SLO < 5s, order-ready → assigned)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 5 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(dispatch_assignment_latency_seconds_bucket[5m])) by (le))", "legendFormat": "assignment p95" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Per-zone tick duration (budget 1-2s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(dispatch_tick_duration_seconds_bucket[5m])) by (le))", "legendFormat": "tick p95" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Offer-conflict rate (SLO < 0.5%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.005 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(dispatch_offer_conflicts_total[10m])) / clamp_min(sum(rate(dispatch_reserve_attempts_total[10m])), 1)", "legendFormat": "conflict rate" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Reservation leak (must be 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(dispatch_reservation_leaked)", "legendFormat": "leaked" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Snapshot replay mismatches (must be 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(dispatch_snapshot_replay_mismatches)", "legendFormat": "replay mismatches" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Batch-quality: pickup-ETA improvement vs greedy baseline (SLO >= 10%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.10 } ] } } },
+      "targets": [
+        { "expr": "avg(dispatch_batch_eta_improvement_ratio)", "legendFormat": "ETA improvement" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Waiting orders / available drivers per zone",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "sum(dispatch_waiting_orders) by (zone)", "legendFormat": "waiting {{zone}}" },
+        { "expr": "sum(dispatch_available_drivers) by (zone)", "legendFormat": "drivers {{zone}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Consumer inbox DLQ depth (must be 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(dispatch_inbox_dlq_depth)", "legendFormat": "dlq depth" }
+      ]
+    }
+  ]
+}

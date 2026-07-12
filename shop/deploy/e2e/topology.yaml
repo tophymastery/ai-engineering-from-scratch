@@ -71,7 +71,12 @@ services:
   # stub->real once the binary builds. The gateway routes /customer-bff/v1/quotes*
   # here (quotes passthrough).
   - { name: pricing-promo,     port: 8107, mode: stub, contract: contracts/openapi/pricing-promo.v1.yaml,     real_cmd: "bash tools/pricing-realcmd.sh" }
-  - { name: dispatch,          port: 8108, mode: stub, contract: contracts/openapi/dispatch.v1.yaml,          real_cmd: "" }
+  # dispatch is the V-T12 slice (D13 zone-owned batch matching): real_cmd boots the
+  # built binary (tools/dispatch-realcmd.sh, dispatch_batch on; ORDER_URL->order slot
+  # so an accepted offer drives the saga, MAP_SIM_URL->map-sim for ETAs). `make
+  # e2e-sync` promotes it stub->real once the binary builds. The gateway routes
+  # /dispatch/v1/* directly and passes /driver-bff/v1/driver/offers* here (offer/accept).
+  - { name: dispatch,          port: 8108, mode: stub, contract: contracts/openapi/dispatch.v1.yaml,          real_cmd: "bash tools/dispatch-realcmd.sh" }
   - { name: location-tracking, port: 8109, mode: stub, contract: contracts/openapi/location-tracking.v1.yaml, real_cmd: "" }
   - { name: notification,      port: 8110, mode: stub, contract: contracts/openapi/notification.v1.yaml,      real_cmd: "" }
   - { name: rating,            port: 8111, mode: stub, contract: contracts/openapi/rating.v1.yaml,            real_cmd: "" }

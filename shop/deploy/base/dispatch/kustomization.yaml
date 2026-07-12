@@ -1,0 +1,16 @@
+# Kustomize base for the V-T12 Dispatch & driver-offer slice (Logistics team;
+# D13 zone-owned batch matching: H3-zone single-writer, 1–2 s tick,
+# greedy-with-swaps, exclusive 10 s driver reservations, deterministic snapshots).
+# Ships the Deployment + Service alongside the other slice bases. Rendered +
+# YAML-validated by `make render-dispatch` (mirrors `make render-order`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml

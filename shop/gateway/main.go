@@ -72,6 +72,16 @@ var bffsWithCartPassthrough = []string{"customer-bff"}
 // it on via the realcmd. Documented in contracts/openapi/customer-bff.v1.yaml.
 var bffsWithQuotesPassthrough = []string{"customer-bff"}
 
+// bffsWithDispatchPassthrough are the BFF prefixes whose driver offer/accept paths
+// the gateway routes DIRECTLY to the dispatch slot (V-T12 / D13 — the driver sees
+// an offer card + accepts it through the driver BFF, behind dispatch_batch). Same
+// discover-from-route-table lifecycle as the passthroughs above: /driver-bff/v1/
+// driver/offers* routes to the dispatch slot (stable per-slot port survives the
+// stub->real swap). The dispatch_batch flag is resolved INSIDE dispatch (not the
+// gateway); the E2E env forces it on via the realcmd. Documented in
+// contracts/openapi/driver-bff.v1.yaml + dispatch.v1.yaml.
+var bffsWithDispatchPassthrough = []string{"driver-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -314,6 +324,31 @@ func main() {
 		mux.Handle(bffPrefix+"v1/quotes", strip)
 		mux.Handle(bffPrefix+"v1/quotes/", strip)
 		log.Printf("quotes passthrough %sv1/quotes* -> %s (pricing-promo)", bffPrefix, pricingBase)
+	}
+
+	// --- V-T12 dispatch offer/accept passthrough ---
+	// dispatch owns driver assignment; the driver app sees an offer card + accepts
+	// it through the driver BFF. Same discover-from-route-table pattern:
+	// /driver-bff/v1/driver/offers* routes directly to the dispatch slot (stable
+	// per-slot port survives the stub->real swap). A more specific pattern than the
+	// generic /driver-bff/ route, so ServeMux longest-prefix match sends offer/accept
+	// here and leaves pickup/deliver on the driver-bff stub. Documented in
+	// contracts/openapi/driver-bff.v1.yaml + dispatch.v1.yaml.
+	dispatchBase := upstreamFor(routes, "/dispatch/")
+	for _, bff := range bffsWithDispatchPassthrough {
+		bffPrefix := "/" + bff + "/"
+		if dispatchBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		dURL, err := url.Parse(dispatchBase)
+		if err != nil {
+			log.Fatalf("bad dispatch upstream %q: %v", dispatchBase, err)
+		}
+		dProxy := httputil.NewSingleHostReverseProxy(dURL)
+		strip := http.StripPrefix("/"+bff, dProxy)
+		mux.Handle(bffPrefix+"v1/driver/offers", strip)
+		mux.Handle(bffPrefix+"v1/driver/offers/", strip)
+		log.Printf("dispatch passthrough %sv1/driver/offers* -> %s (dispatch)", bffPrefix, dispatchBase)
 	}
 
 	flagSet := flags.FromEnv()
