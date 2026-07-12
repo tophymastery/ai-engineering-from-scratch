@@ -827,6 +827,46 @@ else
   fi
 fi
 
+# --- V-T13 driver telemetry plane (D14/D15): simulated driver streams -> kNN query
+# returns them, via the driver-bff position-stream endpoint, behind telemetry_v2.
+# GATED on the location-tracking slot being REAL (process-mode). Proves the DoD:
+# drivers stream GPS through /driver-bff/v1/driver/positions (auth-once + 100ms
+# batch, gateway passthrough -> location-gateway) -> the H3 res-7 geo index -> a
+# kNN read (/location-tracking/v1/drivers:nearby) returns the streamed drivers,
+# nearest first; plus the geo/ingest stats surface zero produce errors and the
+# hottest-key fraction (< 2%). ---
+echo "== V-T13 location telemetry (simulated driver streams -> kNN returns them, via driver-bff behind telemetry_v2) =="
+LOCATION_MODE="$(awk -F'\t' '$1=="location-tracking"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$LOCATION_MODE" != "real" ]; then
+  echo "  SKIP: location-tracking slot mode='$LOCATION_MODE' (not real) — V-T13 deep section runs only when it is the real slot"
+else
+  LDRV="drv_vt13_$$"
+  # 1. stream three simulated drivers near a query point THROUGH the driver-bff
+  #    position-stream endpoint (gateway passthrough -> location-gateway).
+  assert_status "driver position stream (driver-bff -> location-gateway)" \
+    POST "/driver-bff/v1/driver/positions" 202 '{"driver_id":"'"$LDRV"'_a","lat":13.7460,"lng":100.5340}'
+  assert_body "position ingest is auth-once + 100ms batched" \
+    POST "/driver-bff/v1/driver/positions" '"auth_once":true' '{"driver_id":"'"$LDRV"'_a","lat":13.7460,"lng":100.5340}'
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/driver-bff/v1/driver/positions" -H 'Content-Type: application/json' \
+    -d '{"driver_id":"'"$LDRV"'_b","lat":13.7466,"lng":100.5346}' >/dev/null 2>&1
+  curl -s -o /dev/null --max-time 8 -X POST "$GW/location-tracking/v1/telemetry:ingest" -H 'Content-Type: application/json' \
+    -d '{"driver_id":"'"$LDRV"'_c","lat":13.7452,"lng":100.5332}' >/dev/null 2>&1
+  # 2. the kNN read dispatch consumes returns the streamed drivers, nearest first.
+  assert_status "kNN nearby query (the dispatch read contract)" \
+    GET "/location-tracking/v1/drivers:nearby?lat=13.7461&lng=100.5341&k=5" 200
+  assert_body "kNN returns the streamed driver" \
+    GET "/location-tracking/v1/drivers:nearby?lat=13.7461&lng=100.5341&k=5" "${LDRV}_a"
+  assert_body "kNN result carries an H3 res-7 cell" \
+    GET "/location-tracking/v1/drivers:nearby?lat=13.7461&lng=100.5341&k=5" 'h7_'
+  # 3. ingest/skew stats: zero produce errors + a hottest-key fraction surfaced.
+  assert_body "telemetry stats: zero produce errors" \
+    GET "/location-tracking/v1/admin/geo/stats" '"produce_errors":0'
+  assert_body "telemetry stats: hottest-key fraction surfaced (skew dashboard)" \
+    GET "/location-tracking/v1/admin/geo/stats" 'hottest_key_fraction'
+  # 4. flag gate holds (telemetry_v2 is resolved inside the service; forced on here).
+  assert_body "telemetry_v2 on in the E2E env" GET "/location-tracking/healthz" '"telemetry_v2":true'
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

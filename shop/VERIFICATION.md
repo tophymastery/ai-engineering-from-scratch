@@ -2248,3 +2248,162 @@ make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down  # paid order ->
    baseline on the skewed dataset (47.9%), reaching the optimum on small batches.
 6. **Exactly-once consume.** A redelivered `order.paid` / `driver.location_updated`
    `event_id` is a no-op via the durable inbox — no double-registered order/driver.
+
+
+---
+
+# V-T13 Verification (Driver telemetry plane slice — D14 telemetry ingest plane + D15 H3 geo store / telemetry tiering: location-gateway auth-once + 100 ms batching, H3 res-7 Redis geo index (30 s TTL) with a published kNN read contract for dispatch, Flink 1:10 → Iceberg, PG trip summaries only; driver-bff position-stream + migration playbook with kill-switch)
+
+The `location-gateway` service (Location team, slot `location-tracking` port
+**8109**, flag **`telemetry_v2`**) is the per-cell gateway drivers stream GPS to.
+It **authenticates ONCE per connection** (not per frame), buffers ~64-byte
+position frames and **batches 100 ms windows** into the telemetry topic; the
+batched positions land in an **H3 res-7 geo index** (30 s TTL) that publishes a
+**kNN read contract** (`GET /v1/drivers:nearby`) dispatch consumes; raw frames are
+**downsampled 1:10 → Iceberg** and **PG keeps per-trip summaries only**. Same
+environment realities as V-T1–V-T12 (process-mode, in-memory SQLite for PG,
+in-memory eventbus for the telemetry topic, render-only manifests). **The
+hottest-H3-key<2%, the exact-kNN-vs-brute-force, the auth-once accounting, the
+zero-produce-errors, the 100k reconnect recovery, and the PG-write ratio run for
+REAL under `-race`; only wall-clock throughput / the 1 h duration are adapted
+(frozen-clock advance) and disclosed per row.**
+
+## What the plane's correctness means here (FULL)
+
+- **H3 res-7 geo key + salting.** A position's physical geo key is
+  `h7_<lat>_<lng>#<0..63>` (salt = a finalized `libs/sharding.Hash64` of the
+  driver id — the same hot-key-spread primitive V-T4 uses for merchant fan-out).
+  A hot cell's drivers spread across 64 sub-keys, so the **hottest physical key
+  stays < 2% of writes** even if EVERY driver sat in one cell (1/64 = 1.5625%).
+  The res-7 cell is a faithful equal-angle bin at res-7 scale (0.0111° ≈ 1.24 km),
+  the same H3 stand-in V-T4/V-T12 use — no vendored H3 under the std-lib ethos.
+- **Exact kNN.** `GeoStore.KNN` expands res-7 rings from the query cell and stops
+  as soon as the k-th nearest (a size-k max-heap root) is provably closer than any
+  unseen ring (geodesic bound `r·CellMeters`), or every occupied cell is visited.
+  The result is the EXACT k-nearest — verified identical to brute force over 400
+  random fixtures — computed in `O(candidates·log k)`.
+- **Auth-once.** `Hub.Open` calls `Authenticate` exactly once per connection and
+  caches the driver id; `Stream.Push` never authenticates. Proven by the auth
+  counter: 1 call for 5 000 frames, N calls for N streams (any frame count).
+- **Tiering.** Raw frames feed the geo index + a 1:10 Iceberg downsample; PG gets
+  ONE summary row per completed trip. The PG-write path is trip-closes, not
+  positions, so per-cell PG writes stay far under 500/s.
+
+## Store / bus / transport adaptations (disclosed)
+
+No gRPC/MQTT ⇒ the stream protocol (auth-once + 100 ms batch) is modelled
+in-process and is THIS slice's fully-tested code; the real gRPC-bidi/MQTT topology
+is render-only in `deploy/base/location-gateway`. No Kafka ⇒ in-memory eventbus
+telemetry topic (`driver.location_updated`, key `region:driver_id`). No Redis ⇒
+in-process res-7 geo TTL store (the `TTLStore` pattern V-T6 uses to stand in for
+Redis, extended with H3 bucketing + kNN). No Flink/Iceberg ⇒ an in-process 1:10
+downsampler + an in-memory analytics sink. No PG ⇒ in-memory SQLite trip summaries
+(production schema `services/location-gateway/migrations/0001_location.pg.sql`,
+partitioned-by-day, trip-summaries-ONLY — asserted). BFF surface: the service's own
+`/location-tracking/` gateway prefix + a driver-bff → location-gateway passthrough
+for the position-stream (`/driver-bff/v1/driver/positions`), as V-T12 uses
+`/driver-bff/v1/driver/offers*` → dispatch.
+
+## DoD / test-criteria matrix
+
+| # | V-T13 requirement | Status | How verified (measured) |
+|---|---|---|---|
+| DoD-1 | `location-gateway` (gRPC bidi / MQTT fallback, auth-once, 100 ms batching to telemetry topics) (D14) | **full (gRPC/MQTT/Kafka topology render-only)** | `TestAuthOncePerStream` (`-race`): **1** Authenticate call for **5 000** pushed frames. `TestAuthOnceManyStreams`: **500** calls for 500 streams × 200 frames = **100 000** messages (auth is per-connection, never per-frame). `TestHundredMsBatchingAndZeroProduceErrors`: 200 streams × 10 windows batch on the 100 ms window → all frames produced exactly once, **0 produce errors**. The gRPC/MQTT wire + telemetry Kafka topology is expressed in `deploy/base/location-gateway` (render-only); the auth-once + 100 ms batch is real code. |
+| DoD-2 | H3 res-7 Redis geo index (30 s TTL) with a published kNN read contract for dispatch (D15) | **full (Redis render-only)** | `TestKNNMatchesBruteForce` (`-race`): **400/400** random fixtures — kNN matches brute force EXACTLY (ids + order). `TestKNNRespectsTTL`: a position aged 31 s (> 30 s) is excluded from kNN + live count. `TestKNNDriverMovesCells`: a moved driver has no stale duplicate. Contract published: `contracts/openapi/location-tracking.v1.yaml` `GET /v1/drivers:nearby` (the dispatch read). Redis engine is the in-process res-7 TTL store (render-only cluster). |
+| DoD-3 | Flink 1:10 downsample → Iceberg; PG trip summaries only (D15) | **full (Flink/Iceberg render-only)** | `TestDownsampleOneInTen`: 100 000 raw frames → **10 000** Iceberg rows (exactly 1:10), **0** PG rows on the raw path. `TestSchemaParity`: the PG migration declares exactly **1** table (`trip_summaries`) — no raw-position table (D15). `TestCloseTripWritesOnePGRow`: 50 raw frames wrote **0** PG rows; a trip close wrote **1**. Flink/Iceberg are the in-process downsampler + analytics sink (render-only). |
+| DoD-4 | driver-bff position-stream endpoint | **full (adapted boot)** | Gateway passthrough `/driver-bff/v1/driver/positions` → the location-tracking slot (`gateway/main.go` `bffsWithPositionPassthrough`); the E2E smoke streams a driver through it (§ below). `TestIngestThenKNN` / `TestAuthOnceAcrossIngestCalls`: repeated ingests for one driver reuse ONE stream (auth-once across HTTP calls). |
+| DoD-5 | driver-app protocol migration plan with kill-switch | **full (doc)** | `docs/runbooks/location-gateway.md` "Migration playbook": dark-deploy → shadow dual-send → 1% canary → ramp → **kill-switch** (`telemetry_v2=false`, per-cell/global, read per-request, < 1 min rollback, dispatch falls back to the warm old index) → decommission, plus a kill-switch drill. |
+| Test | kNN p99 < 10 ms at 200k writes/s | **full (latency) / adapted (throughput)** | `TestPerf_KNNp99` (no -race): **200 000** drivers loaded (metro-realistic skew), 5 000 kNN queries k=10 → **p50 = 531 µs, p95 = 1.29 ms, p99 = 1.55 ms** — ≪ the 10 ms budget. Latency FULL (real, measured, printed); the 200k-writes/s sustained THROUGHPUT is the V-T31/V-T32 load-harness seam (the geo index holds the 200k population; the sandbox never sleeps / has no Redis). |
+| Test | hottest H3 key < 2% of writes | **full** | `TestHottestGeoKeyUnderTwoPercent`: 50 000 drivers, spatially skewed (80% in a few downtown cells), 20 writes each = 1 000 000 writes through the REAL salted `Update` path → hottest UNSALTED cell = **19.482%** (the D15 hot partition) → hottest SALTED key = **0.3662%** after the 64-way salt spread. `TestSaltSpreadsDegenerateSingleCell`: the WORST case — every driver in ONE cell (200 000 writes) → hottest salted key = **1.7400% (< 2%)**, within 1.1× of the 1/64 mean. Real histograms. |
+| Test | Gateway ingest p99 < 5 ms; zero produce errors (adapted from 300k msg/s 1 h) | **full (latency + zero-errors) / adapted (throughput/duration)** | `TestPerf_IngestP99` (no -race): 2 000 streams × 300 = **600 000** messages over a sustained burst → per-message ingest **p50 = 100 ns, p95 = 227 ns, p99 = 531 ns** — ≪ the 5 ms budget; **0 produce errors**, produced == pushed (no loss/dup). Latency + zero-errors FULL; the 300k msg/s × 1 h sustained load is the V-T32 driver-simulator seam (disclosed). |
+| Test | 100k reconnect storm recovered < 60 s | **full (recovery + count) / adapted (wall-clock window)** | `TestReconnectStorm100k` (`-race`): 100 000 streams established → mass sever → **100 000/100 000 reconnect + resume** in a modelled **50 s** window (< 60 s; frozen clock advanced by a pessimistic 0.5 ms/reconnect; real handling **94 ms**), auth calls = 2×N (one per (re)connect — auth-once holds across reconnects). `TestReconnectStormConcurrent` (`-race`): 100 000 across 16 workers, race-clean. Count + recovery FULL; only the 60 s wall-clock window is simulated. |
+| Test | PG location writes < 500/s per cell | **full** | `TestPGWriteRateUnderBudget`: one busy cell, 2 000 drivers at 1 Hz (2 000 raw frames/s) with 5% completing a trip that second → PG = **100 writes/s** (trip summaries only) < 500/s budget; raw:PG ratio **20×**. `TestDownsampleOneInTen`: raw never hits PG. Real ratio. |
+| DoD | Demo-able end-to-end via its BFF endpoint in the shared E2E env: simulated driver streams → kNN query returns them (`telemetry_v2` on) | **full (adapted boot)** | `tools/e2e-smoke.sh` V-T13 section (gated on location-tracking real, process-mode): 3 simulated drivers streamed through **`/driver-bff/v1/driver/positions`** (auth-once + 100 ms batch, gateway passthrough → location-gateway) → **kNN `/location-tracking/v1/drivers:nearby` returns the streamed driver, nearest first, with an `h7_` H3 cell** → geo stats surface **0 produce errors** + the hottest-key fraction → `telemetry_v2:true`. Clean full-topology run: **133/133 assertions GREEN**. |
+| DoD | Four test levels green; ingest/connection/skew dashboards + alerts live; migration playbook published | **full (alerts/dash render-only)** | Unit: the `-race` geo/salt/knn/gateway/reconnect/tier suites. Contract: `location-tracking.v1` OpenAPI (grown additively per D30) + `driver.location_updated` schema pass `registryctl validate` (make contract-validate GREEN); `TestEmittedEventIsSchemaValid` — the emitted event is valid vs its published schema. Integration: HTTP handlers + flag gating (`TestFlagGating` — off ⇒ 404 TELEMETRY_DISABLED) + ingest→kNN + close-trip + geo-stats. E2E: the smoke above. `deploy/alerts/location-gateway.yaml` (ingest p99 > 5 ms, produce-errors > 0, kNN p99 > 10 ms, hot-key > 2%, PG-writes > 500/s per cell, reconnect > 60 s) + `deploy/dashboards/location-gateway.json` (ingest/connection/skew panels) — both parsed by `make render-location`; `deploy/base/location-gateway` renders via kustomize. `docs/runbooks/location-gateway.md` (SLOs + invariants + migration playbook + kill-switch). `ownership.yaml`: `location-gateway/location-tracking → Location, V-T13`. |
+
+## Measured numbers
+
+| Metric | Value |
+|---|---|
+| Hottest UNSALTED H3 cell (skewed 1M-write fixture) | **19.482%** of writes (the D15 hot partition) |
+| Hottest SALTED H3 key (same fixture, 64 salts) | **0.3662%** of writes (< 2%) |
+| Hottest SALTED key — degenerate single-cell (200k writes) | **1.7400%** of writes (< 2%; 1/64 = 1.5625% floor) |
+| kNN correctness vs brute force | **400/400** random fixtures EXACT (ids + order) |
+| kNN latency (n=200k drivers, 5000 queries, k=10) | **p50 = 531 µs, p95 = 1.29 ms, p99 = 1.55 ms** (budget 10 ms) |
+| Auth-once — 1 stream, 5000 frames | **1** Authenticate call |
+| Auth-once — 500 streams × 200 frames | **500** Authenticate calls (100 000 messages) |
+| Gateway ingest latency (2000 streams × 300 = 600 000 msgs) | **p50 = 100 ns, p95 = 227 ns, p99 = 531 ns** (budget 5 ms) |
+| Produce errors over the burst | **0** (produced == pushed) |
+| Reconnect storm (100k sever → reconnect) | **100 000/100 000** recovered, modelled **50 s** window (< 60 s), real handling **94 ms** |
+| Downsample ratio raw → Iceberg | **10 : 1** (100 000 → 10 000) |
+| PG writes on the raw path | **0** (raw never hits PG) |
+| PG write rate per busy cell (2000 drivers, 5% trip-close/s) | **100/s** (< 500/s), raw:PG **20×** |
+| E2E smoke (full topology, clean run) | **133/133** assertions GREEN |
+
+## Commands to reproduce
+
+```
+cd services/location-gateway && go test -race -count=1 ./...            # hottest-key<2% + exact kNN vs brute + auth-once + 100ms batch/zero-produce-errors + 100k reconnect<60s + tiering/PG-ratio + flag + event/schema conformance
+cd services/location-gateway && go test -count=1 -run TestPerf ./plane/ # perf criteria (no -race): kNN p99<10ms @200k drivers + gateway ingest p99<5ms
+make contract-validate       # location-tracking.v1 OpenAPI (additive) + driver.location_updated schema (D30)
+make render-location         # location-gateway base (Deployment+Service) + ingest/produce-error/kNN/hot-key-skew/PG-write/reconnect alerts + dashboard
+make e2e-sync && make e2e-up && make e2e-smoke && make e2e-down  # simulated driver streams -> kNN returns them via driver-bff behind telemetry_v2
+./tools/changed-paths_test.sh   # 3 passed, 0 failed (services/location-gateway in the libs-change=all fixture)
+./ci/run-local.sh            # FULL pipeline incl. all V-T13 gates — exits 0
+```
+
+## Deviations summary (V-T13)
+
+1. **gRPC-bidi / MQTT / Kafka → in-process stream protocol + eventbus.** The
+   auth-once + 100 ms batch (the D14 ingest logic) is THIS slice's fully-tested
+   code; the gRPC/MQTT transport and the telemetry Kafka topology (512
+   partitions/cell) are expressed in `deploy/base/location-gateway` (render-only).
+   `driver.location_updated` (key `region:driver_id`) rides the in-memory eventbus.
+2. **Redis Cluster geo index → in-process res-7 TTL store.** The salted-key write
+   path (hottest key < 2%), the 30 s TTL expiry, and the exact kNN are real; only
+   the Redis engine is a concurrent map under the injected Clock (the V-T6 Redis
+   stand-in pattern). The Redis Cluster topology is render-only.
+3. **Flink 1:10 → Iceberg** and **PG** → an in-process 1:10 downsampler + an
+   in-memory analytics sink + in-memory SQLite. The 10:1 ratio and the
+   raw-never-hits-PG / trip-summaries-only rule are asserted for real; the
+   production PG schema (`migrations/0001_location.pg.sql`, day-partitioned,
+   one table) is render-only.
+4. **H3 res-7 → faithful equal-angle bin at res-7 scale** (0.0111° ≈ 1.24 km, ~two
+   H3 resolutions finer than the Res5DegLat V-T4/V-T12 use) — no vendorable H3 lib
+   under the std-lib ethos. kNN ranks on TRUE geodesic (haversine) distance, so
+   correctness does not depend on the bin geometry (proven vs brute force).
+5. **300k msg/s × 1 h + 200k writes/s → adapted throughput / frozen-clock windows.**
+   The correctness invariants (hottest-key<2%, kNN-correct, auth-once,
+   zero-produce-errors, reconnect-recovery-count, PG-write ratio) are FULL and
+   measured at real scale (1M writes, 200k drivers, 600k messages, 100k reconnects);
+   only the sustained wall-clock rate and the 1 h duration are the V-T31/V-T32
+   load-harness seam, disclosed per row.
+6. **kNN read contract is HTTP `GET /v1/drivers:nearby`.** Dispatch (V-T12) today
+   owns its own in-memory zone index; this slice PUBLISHES the kNN read contract
+   (order's cell + widening rings, D15) that dispatch consumes when the telemetry
+   plane is the location authority. The contract is in `location-tracking.v1.yaml`
+   (additive, D30) and demoed in the E2E smoke.
+7. **`telemetry_v2` default is env-driven** (`FLAG_TELEMETRY_V2`), OFF in the prod
+   overlay and ON in the e2e realcmd — the flag gates every endpoint (disabled ⇒
+   404 TELEMETRY_DISABLED). Per-request `X-Flag-Override` honoured only in non-prod
+   builds. Core subpackage `services/location-gateway/plane` (match/index-style)
+   holds the correctness; `main` wraps it with HTTP + the telemetry sink + SQLite.
+8. **INFO sampling on the ultra-hot ingest path (04 §2).** `location-gateway` logs
+   at a 2% INFO sample rate on the location ingest path (`LOG_SAMPLE_RATE=0.02`);
+   errors/WARN+ are never sampled (libs/logging).
+
+## Key invariants (V-T13)
+
+1. **Hottest H3 key < 2% of writes.** Salting the res-7 geo key across 64 driver-
+   hashed sub-keys keeps the busiest physical key < 2% of writes even under maximal
+   spatial concentration (degenerate single-cell = 1.74%).
+2. **Exact kNN.** Ring-expanding search + a geodesic stop bound + a size-k heap
+   returns the true k-nearest (verified vs brute force 400/400), in O(cands·log k).
+3. **Auth-once.** Authentication happens once per connection, never per frame —
+   proven by the auth counter across 5 000-frame and 100 000-message runs.
+4. **Zero produce errors + no loss.** Every buffered frame is produced exactly once
+   on the 100 ms flush; produced == pushed, produce errors = 0.
+5. **Reconnect recovery.** A 100k mass sever recovers 100% of streams within the
+   60 s window (frozen clock), auth-once holding across reconnects.
+6. **PG carries summaries only.** Raw positions feed the geo index + 1:10 Iceberg;
+   PG gets one row per trip close — per-cell PG writes stay under 500/s.

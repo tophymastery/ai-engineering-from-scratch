@@ -20,6 +20,7 @@ services:
   pricing-promo:     { team: "Growth",           slice: "V-T8"  }
   dispatch:          { team: "Logistics",        slice: "V-T12" }
   location-tracking: { team: "Location",         slice: "V-T13" }
+  location-gateway:  { team: "Location",         slice: "V-T13" }
   notification:      { team: "Growth",           slice: "V-T15" }
   rating:            { team: "Growth",           slice: "V-T17" }
   settlement:        { team: "Money Movement",   slice: "V-T19" }

@@ -1,0 +1,92 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: location-gateway
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: location
+    slice: V-T13
+    decisions: D14,D15
+spec:
+  groups:
+    # SLOs (V-T13, D14/D15):
+    #   - gateway ingest p99 < 5 ms + ZERO produce errors (D14 ingest plane)
+    #   - kNN read p99 < 10 ms (D15 geo store dispatch read)
+    #   - hottest H3 key < 2% of writes (D15 hot-partition avoidance via salting)
+    #   - PG location writes < 500/s per cell (D15 tiering: PG summaries only)
+    #   - connection health: reconnect storms recover fast (D14 auth-once streams)
+    - name: location-gateway.ingest
+      rules:
+        - alert: LocationGatewayIngestLatencyHigh
+          # THE ingest-latency alert (DoD): per-message ingest p99 must stay under
+          # the 5 ms budget over the sustained 300k msg/s burst.
+          expr: histogram_quantile(0.99, sum(rate(location_gateway_ingest_latency_seconds_bucket[5m])) by (le)) > 0.005
+          for: 5m
+          labels:
+            severity: critical
+            team: location
+          annotations:
+            summary: "location-gateway ingest p99 > 5ms"
+            description: "Per-message stream ingest is slow: the 100 ms batch buffer append should be sub-millisecond. Check auth-once (auth must NOT run per frame), buffer contention, and telemetry-topic produce backpressure. Runbook: docs/runbooks/location-gateway.md."
+        - alert: LocationGatewayProduceErrors
+          # ZERO produce errors is the DoD guarantee; any failed telemetry produce
+          # is a data-loss risk on the ingest plane.
+          expr: sum(rate(location_gateway_produce_errors_total[5m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            team: location
+          annotations:
+            summary: "location-gateway telemetry produce errors > 0"
+            description: "Batched positions are failing to produce to the telemetry topic. Check the telemetry Kafka cluster health/quota (D5), broker connectivity, and partition availability. Runbook: docs/runbooks/location-gateway.md."
+
+    - name: location-gateway.geo
+      rules:
+        - alert: LocationGatewayKNNLatencyHigh
+          # The kNN read dispatch consumes must stay under 10 ms p99 at 200k writes/s.
+          expr: histogram_quantile(0.99, sum(rate(location_gateway_knn_latency_seconds_bucket[5m])) by (le)) > 0.010
+          for: 5m
+          labels:
+            severity: warning
+            team: location
+          annotations:
+            summary: "location-gateway kNN p99 > 10ms"
+            description: "The nearby-drivers read is slow — dispatch offer latency degrades. Check geo-store contention, ring-expansion depth (driver density), and salt fan-out. Runbook: docs/runbooks/location-gateway.md."
+        - alert: LocationGatewayHotKeySkew
+          # D15 hot-partition guard: no single physical H3 geo key should exceed 2%
+          # of writes. A breach means the salt spread is failing (a mega-hot cell).
+          expr: max(location_gateway_hottest_key_fraction) > 0.02
+          for: 10m
+          labels:
+            severity: warning
+            team: location
+          annotations:
+            summary: "location-gateway hottest H3 geo key > 2% of writes"
+            description: "A single salted H3 res-7 key is taking >2% of position writes — the D15 hot-partition the salting must prevent. Check NumSalts, the salt hash distribution, and whether one cell is pathologically dense. Runbook: docs/runbooks/location-gateway.md."
+
+    - name: location-gateway.tiering
+      rules:
+        - alert: LocationGatewayPGWriteRateHigh
+          # D15 tiering: PG keeps trip summaries ONLY; per-cell PG write rate must
+          # stay under 500/s (raw positions never hit PG).
+          expr: sum(rate(location_gateway_pg_writes_total[5m])) by (cell) > 500
+          for: 5m
+          labels:
+            severity: critical
+            team: location
+          annotations:
+            summary: "location-gateway PG location writes > 500/s per cell"
+            description: "PG is receiving more than trip summaries — raw positions may be leaking onto the cold path (D15 forbids this). Check the 1:10 downsampler and the raw→PG boundary. Runbook: docs/runbooks/location-gateway.md."
+
+    - name: location-gateway.connections
+      rules:
+        - alert: LocationGatewayReconnectStormSlow
+          # D14 reconnect storms (a pod rollout severs the fleet) must recover < 60s.
+          expr: max(location_gateway_reconnect_recovery_seconds) > 60
+          for: 2m
+          labels:
+            severity: warning
+            team: location
+          annotations:
+            summary: "location-gateway reconnect recovery > 60s"
+            description: "A mass reconnect (deploy/network blip) is taking >60s to re-establish the fleet's streams. Check auth throughput (auth-once must hold), stream registration contention, and HPA headroom. Runbook: docs/runbooks/location-gateway.md."
