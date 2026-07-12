@@ -142,7 +142,7 @@ charges, zero lost orders**. Every new service's DoD includes SLO + runbook +
 - **Team:** DevEx
 - **Decisions implemented:** none (base blueprint, 03 §3/§5)
 - **Depends on:** S-T1, S-T5
-- **Scope:** `payment-sim` (scriptable PSP incl. webhooks and settlement files, decline/timeout cards), `map-sim` (deterministic routing/ETA), `notify-sink` (queryable inbox); `libs/factories` (Go + TS) and `seedctl` with declarative scenarios; golden datasets `demo-small` and `lunch-rush` (skewed load datasets live in V-T31).
+- **Scope:** `payment-sim` (scriptable PSP incl. webhooks and settlement files, decline/timeout cards), `map-sim` (deterministic routing/ETA), `notify-sink` (queryable inbox); `libs/factories` (Rust crate; TS mirror for frontend only) and `seedctl` with declarative scenarios; golden datasets `demo-small` and `lunch-rush` (skewed load datasets live in V-T31).
 - **Definition of Done:**
   - All three fakes implement the exact adapter contracts from S-T5 and run in compose + E2E env.
   - Every core entity has one factory; `make seed SCENARIO=lunch-rush` populates any stack via public APIs.

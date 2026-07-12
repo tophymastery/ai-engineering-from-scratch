@@ -5,8 +5,17 @@ A production-grade design blueprint for a Grab-style food-delivery platform:
 run the marketplace. Written so an engineering team (or an AI agent) can copy
 this folder into an empty repo and implement the whole system from it.
 
-**Stack (confirmed):** Go microservices · TypeScript (NestJS) BFFs · Kubernetes ·
+**Stack (confirmed):** Rust microservices · Rust (axum) BFFs · Kubernetes ·
 Kafka · PostgreSQL · Redis · GitOps (Argo CD) · OpenTelemetry.
+Backend language is Rust end-to-end (services **and** BFFs) per
+[decision D31](docs/05-scale-100m.md#3j-cost-org-engineering-hygiene).
+
+> **Implementation status.** The blueprint (this folder's design docs) is the
+> source of truth and now specifies **Rust**. The `services/`, `bffs/`, and
+> `libs/` code currently checked in is the earlier **Go reference
+> implementation** (setup phase + slices V-T1…V-T13, all gated and merged); it
+> is being ported to Rust per D31. New slices are authored in Rust; the Go
+> tree stays as a working reference until each bounded context is ported.
 
 ## The docs
 
@@ -30,7 +39,7 @@ flowchart LR
     GW[API Gateway<br/>authn, rate limit, request-id]
     BFF1[customer-bff]; BFF2[merchant-bff]; BFF3[driver-bff]; BFF4[admin-bff]
   end
-  subgraph Services["Go microservices (one DB each)"]
+  subgraph Services["Rust microservices (one DB each)"]
     ID[identity]; CAT[merchant-catalog]; SRCH[search]; CART[cart]
     ORD[order saga]; PAY[payment]; PRC[pricing-promo]; DSP[dispatch]
     LOC[location-tracking]; NTF[notification]; RATE[rating]; STL[settlement]
