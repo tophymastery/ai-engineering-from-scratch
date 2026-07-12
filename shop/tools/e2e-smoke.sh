@@ -640,6 +640,52 @@ else
   if [ "$IC" = 409 ]; then pass "illegal transition (accept a CANCELLED order) -> 409 ORDER_INVALID_TRANSITION"; else bad "illegal transition -> $IC (want 409)"; fi
 fi
 
+# --- V-T10 payment authorize/capture/refund (D9) ----------------------------
+# Runs the deep section only when the payment slot is the REAL service (not a
+# contract stub). auth -> capture -> refund via the payment BFF slot (behind
+# payment_v1), a decline fixture (card 4000...0002 -> 402), and a webhook 10x
+# replay -> single applied confirmation (inbox dedupe). Routed through the
+# gateway /payment/ prefix (the payment slot's own API is its BFF surface, as
+# V-T9 routes /order/ directly).
+echo "== V-T10 payment (authorize -> capture -> refund + decline 4000..0002 + webhook replay dedupe, via the real payment service) =="
+PAYMENT_MODE="$(awk -F'\t' '$1=="payment"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$PAYMENT_MODE" != "real" ]; then
+  echo "  SKIP: payment slot mode='$PAYMENT_MODE' (not real) — V-T10 deep section runs only when payment is the real slot"
+else
+  POID="ord_e2e_pay_$$"
+  PBODY='{"order_id":"'"$POID"'","customer_id":"usr_e2e","amount":{"amount":42550,"currency":"THB"},"card_number":"4111111111111111"}'
+  # 1. authorize (good card) -> 201 AUTHORIZED (D9: Idempotency-Key required).
+  AC="$(curl -s --max-time 8 -X POST "$GW/payment/v1/payments:authorize" -H 'Content-Type: application/json' -H "Idempotency-Key: pay_auth_$$" -d "$PBODY" 2>/dev/null)"
+  PID="$(printf '%s' "$AC" | sed -n 's/.*"payment_id":"\([^"]*\)".*/\1/p')"
+  if [ -n "$PID" ] && [[ "$AC" == *'"status":"AUTHORIZED"'* ]]; then pass "authorize (good card) minted payment $PID AUTHORIZED"; else bad "authorize failed (${AC:0:200})"; fi
+  # 1b. idempotent double-tap: same key replays ONE payment (Idempotency-Replayed: true).
+  RH="$(curl -s -D - -o /dev/null --max-time 8 -X POST "$GW/payment/v1/payments:authorize" -H 'Content-Type: application/json' -H "Idempotency-Key: pay_auth_$$" -d "$PBODY" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="idempotency-replayed"{print $2}')"
+  if [ "$RH" = "true" ]; then pass "authorize double-tap replays ONE charge (Idempotency-Replayed: true, D9)"; else bad "authorize double-tap did not replay (got '$RH')"; fi
+  # 2. capture -> 200 CAPTURED (distinct Idempotency-Key; D9 per money mutation).
+  CAP="$(curl -s --max-time 8 -X POST "$GW/payment/v1/payments/$PID:capture" -H 'Content-Type: application/json' -H "Idempotency-Key: pay_cap_$$" -d '{}' 2>/dev/null)"
+  CAPID="$(printf '%s' "$CAP" | sed -n 's/.*"capture_id":"\([^"]*\)".*/\1/p')"
+  if [[ "$CAP" == *'"status":"CAPTURED"'* ]]; then pass "capture -> CAPTURED (payment_id $PID)"; else bad "capture failed (${CAP:0:200})"; fi
+  # 3. refund -> 200 REFUNDED.
+  REF="$(curl -s --max-time 8 -X POST "$GW/payment/v1/payments/$PID:refund" -H 'Content-Type: application/json' -H "Idempotency-Key: pay_ref_$$" -d '{}' 2>/dev/null)"
+  if [[ "$REF" == *'"status":"REFUNDED"'* ]]; then pass "refund -> REFUNDED (auth->capture->refund full path)"; else bad "refund failed (${REF:0:200})"; fi
+  # 4. decline fixture: card 4000...0002 -> 402 PAYMENT_DECLINED (order compensates).
+  DBODY='{"order_id":"ord_e2e_decl_'"$$"'","amount":{"amount":42550,"currency":"THB"},"card_number":"4000000000000002"}'
+  DC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/payment/v1/payments:authorize" -H 'Content-Type: application/json' -H "Idempotency-Key: pay_decl_$$" -d "$DBODY" 2>/dev/null)"
+  if [ "$DC" = 402 ]; then pass "decline card 4000..0002 -> 402 (payment.failed / compensation)"; else bad "decline -> $DC (want 402)"; fi
+  # 5. webhook 10x replay -> single applied confirmation (inbox dedupe). Keyed on
+  #    the capture_id from step 2, same event_id every time.
+  if [ -n "$CAPID" ]; then
+    WEV="evt_e2e_hook_$$"
+    WBODY='{"event_id":"'"$WEV"'","event_type":"payment.captured","capture_id":"'"$CAPID"'"}'
+    W1="$(curl -s --max-time 8 -X POST "$GW/payment/v1/psp/webhooks" -H 'Content-Type: application/json' -d "$WBODY" 2>/dev/null)"
+    for _ in 1 2 3 4 5 6 7 8 9; do curl -s -o /dev/null --max-time 8 -X POST "$GW/payment/v1/psp/webhooks" -H 'Content-Type: application/json' -d "$WBODY" >/dev/null 2>&1; done
+    WN="$(curl -s --max-time 8 -X POST "$GW/payment/v1/psp/webhooks" -H 'Content-Type: application/json' -d "$WBODY" 2>/dev/null)"
+    if [[ "$W1" == *'"applied":true'* ]] && [[ "$WN" == *'"applied":false'* ]]; then pass "webhook 10x replay (same event_id) -> single applied confirmation (inbox dedupe)"; else bad "webhook replay dedupe failed (first=${W1:0:80} later=${WN:0:80})"; fi
+  else
+    bad "webhook replay: no capture_id captured to key the webhook"
+  fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

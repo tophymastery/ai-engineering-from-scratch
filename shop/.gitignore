@@ -12,6 +12,7 @@
 /services/cart/cart
 /services/pricing-promo/pricing-promo
 /services/order/order
+/services/payment/payment
 # S-T7 fake-provider binaries (services build to .run/ in process mode).
 /services/fakes/payment-sim/payment-sim
 /services/fakes/map-sim/map-sim

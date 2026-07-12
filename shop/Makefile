@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf render-feed-cache render-cart render-pricing render-order e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf render-feed-cache render-cart render-pricing render-order render-payment e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -42,6 +42,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/cart && $(GO) build ./...
 	@cd services/pricing-promo && $(GO) build ./...
 	@cd services/order && $(GO) build ./...
+	@cd services/payment && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -143,6 +144,10 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@cd services/order && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@echo "== V-T9 perf criteria (no -race; race instrumentation invalidates latency): checkout p99<800ms =="
 	@$(MAKE) --no-print-directory test-order-perf
+	@echo "== V-T10 payment authorize/capture/refund (D9, -race): PG-durable idempotency on EVERY money mutation (retry=>1 charge) + forced Redis failover storm (zero duplicate charges, zero lost orders) + webhook 10x replay=>1 transition + decline(4000..0002)/timeout(..0044)+circuit + every state transition + event/HTTP contract-conformant + order-event consumer + flag =="
+	@cd services/payment && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T10 perf criteria (no -race): authorize p99<500ms vs sim =="
+	@$(MAKE) --no-print-directory test-payment-perf
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -244,6 +249,9 @@ test-cart-perf: ## V-T7: cart perf criteria (no -race): add/get/remove p99<100ms
 test-order-perf: ## V-T9: order perf criteria (no -race): checkout p99<800ms
 	@cd services/order && $(GO) test -count=1 -run TestPerf ./...
 
+test-payment-perf: ## V-T10: payment perf criteria (no -race): authorize p99<500ms vs sim
+	@cd services/payment && $(GO) test -count=1 -run TestPerf ./...
+
 test-pricing-perf: ## V-T8: pricing perf criteria (no -race): quote p99<300ms + concurrency burst
 	@cd services/pricing-promo && $(GO) test -count=1 -run TestPerf ./...
 
@@ -288,6 +296,16 @@ render-order: ## V-T9: render the order base (Deployment+Service) + lint the stu
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/order.yaml && $(GO) run . $$root/deploy/dashboards/order.json ); \
 	  echo "render-order: order base (Deployment+Service) + stuck-order SLO/timer-fire/DLQ alerts + dashboard rendered/parsed"
+
+render-payment: ## V-T10: render the payment base (Deployment+Service) + lint the auth-rate/failure/duplicate-charge SLO alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-payment.yaml; \
+	  $(KUSTOMIZE) build deploy/base/payment > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: payment' $$f || { echo "render-payment: payment Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-payment: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/payment.yaml && $(GO) run . $$root/deploy/dashboards/payment.json ); \
+	  echo "render-payment: payment base (Deployment+Service) + auth-rate/failure/duplicate-charge SLO alerts + dashboard rendered/parsed"
 
 render-cart: ## V-T7: render the cart base (Deployment+Service) + lint the cart latency/revalidation/snapshot alerts + dashboard
 	@set -e; root=$$PWD; f=$$root/.render-cart.yaml; \

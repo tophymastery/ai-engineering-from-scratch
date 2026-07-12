@@ -1,0 +1,98 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payment
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: payments
+    slice: V-T10
+    decisions: D9
+spec:
+  groups:
+    # SLOs (V-T10):
+    #   - authorization success rate (the headline Payments dashboard metric)
+    #   - money-path invariant: zero duplicate charges (D9 exactly-once)
+    #   - PSP failure rate + circuit-breaker open (decline/timeout handling)
+    #   - authorize p99 < 500 ms vs the acquirer
+    #   - webhook / inbox DLQ depth (exactly-once confirmation)
+    - name: payment.auth
+      rules:
+        - alert: PaymentAuthRateLow
+          # Auth-success rate = authorized / (authorized + failed). Alert below 90%.
+          expr: |
+            sum(rate(payment_authorized_total[10m]))
+              / clamp_min(sum(rate(payment_authorized_total[10m])) + sum(rate(payment_failed_total[10m])), 1)
+              < 0.90
+          for: 10m
+          labels:
+            severity: critical
+            team: payments
+          annotations:
+            summary: "payment authorization success rate < 90%"
+            description: "The authorize success rate has dropped below the 90% SLO — check the PSP adapter (decline surge? issuer outage?), the circuit-breaker state, and the payment-sim/acquirer health. Runbook: docs/runbooks/payment.md."
+
+    - name: payment.money
+      rules:
+        - alert: PaymentDuplicateChargeDetected
+          # Money-path invariant (every slice): zero duplicate charges. The D9
+          # UNIQUE(idempotency_key) + UNIQUE(order_id) guards must hold this at 0.
+          expr: sum(increase(payment_duplicate_charge_total[1h])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            team: payments
+          annotations:
+            summary: "duplicate charge detected on the payment slice"
+            description: "The D9 idempotency path let a second charge through. This must be zero. Freeze the affected key range, inspect idempotency_keys + the payments UNIQUE(order_id) index, and reconcile against the PSP. Runbook: docs/runbooks/payment.md."
+        - alert: PaymentLostChargeDetected
+          # Zero lost orders: an order that reached authorize with no charge row.
+          expr: sum(increase(payment_lost_charge_total[1h])) > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: payments
+          annotations:
+            summary: "an order was authorized but has no charge (lost payment)"
+            description: "A payment authorization was acknowledged but no durable charge row exists — a lost order. Check for tx-commit failures / cache-vs-DB divergence. Runbook: docs/runbooks/payment.md."
+
+    - name: payment.psp
+      rules:
+        - alert: PaymentPSPFailureRateHigh
+          expr: sum(rate(payment_psp_error_total[5m])) / clamp_min(sum(rate(payment_psp_call_total[5m])), 1) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "PSP error rate > 5%"
+            description: "PSP (acquirer) errors — timeouts/unavailability — exceed 5%. The circuit breaker may open and shed authorizes. Check the acquirer + network. Runbook: docs/runbooks/payment.md."
+        - alert: PaymentCircuitOpen
+          expr: max(payment_circuit_open) > 0
+          for: 2m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "payment PSP circuit breaker OPEN"
+            description: "The PSP circuit breaker has opened after repeated timeouts — authorizes are fast-failing. Verify acquirer health; the breaker half-opens after the cooldown. Runbook: docs/runbooks/payment.md."
+        - alert: PaymentWebhookDLQDepthHigh
+          expr: sum(payment_inbox_dlq_depth) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "payment webhook/order-event inbox DLQ not empty"
+            description: "PSP webhooks or order events have exhausted retries and parked to the DLQ — confirmations/compensations are being dropped. Inspect + replay with tools/dlqctl. Runbook: docs/runbooks/payment.md."
+
+    - name: payment.latency
+      rules:
+        - alert: PaymentAuthorizeLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(payment_request_duration_seconds_bucket{route="/v1/payments:authorize"}[5m])) by (le)) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "authorize p99 > 500ms"
+            description: "POST /v1/payments:authorize p99 latency budget (500ms vs sim) is burning. Check the D9 DB path + the PSP round-trip. Runbook: docs/runbooks/payment.md."

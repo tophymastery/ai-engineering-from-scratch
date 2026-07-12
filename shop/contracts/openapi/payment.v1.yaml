@@ -1,13 +1,16 @@
-# payment.v1 — minimal S-T8 topology contract (01 §1 `payment`).
-# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T10 merges.
-# The real payment service delegates to the payment-sim fake (PSP side); this
-# contract is the shop-internal authorize surface the order saga calls. Grows
-# additively per D30. Conventions (02 §1): /v1 paths, snake_case, error envelope.
+# payment.v1 — the shop-internal authorize/capture/refund surface the order saga
+# + BFFs call (01 §1 `payment`). The real payment service (V-T10) delegates to a
+# PSP adapter (the payment-sim fake in-sandbox, a real acquirer in prod) and
+# publishes payment.* events keyed region:order_id. Grows additively per D30:
+# v1.1.0 adds :capture, :refund, GET, and the wallet surface (v1.0.0 shipped only
+# authorize as the S-T8 topology stub). Conventions (02 §1): /v1 paths,
+# snake_case, integer minor-unit Money, Idempotency-Key on every money mutation
+# (D9), error envelope on every non-2xx.
 openapi: 3.0.3
 info:
   title: payment
-  version: "1.0.0"
-  description: Authorize/capture/refund via PSP adapters (01 §1). Minimal E2E stub — authorize.
+  version: "1.1.0"
+  description: Authorize/capture/refund + wallet via PSP adapters (01 §1, V-T10). D9 idempotency on every money mutation.
 servers:
   - url: https://api.shop.io
 paths:
@@ -23,10 +26,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [order_id, payment_method_id, amount]
+              required: [order_id, amount]
               properties:
                 order_id: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+                customer_id: { type: string, example: "usr_01H8XGK5V" }
                 payment_method_id: { type: string, example: "pm_01H8XGK5V" }
+                method: { type: string, enum: [card, wallet], example: "card" }
                 amount: { $ref: "#/components/schemas/Money" }
       responses:
         "201":
@@ -40,6 +45,108 @@ paths:
                 status: "AUTHORIZED"
                 amount: { amount: 42550, currency: "THB" }
                 authorized_at: "2026-07-11T02:15:00Z"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/payments/{payment_id}:capture:
+    post:
+      operationId: capture_payment
+      summary: Capture an authorized payment (idempotent money mutation, D9).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: payment_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Payment captured (or an idempotent replay of a prior capture).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/payments/{payment_id}:refund:
+    post:
+      operationId: refund_payment
+      summary: Refund a captured payment (idempotent money mutation, D9).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: payment_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Payment refunded (or an idempotent replay of a prior refund).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/payments/{payment_id}:
+    get:
+      operationId: get_payment
+      summary: Payment detail + current status.
+      parameters:
+        - name: payment_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The payment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/wallet:credit:
+    post:
+      operationId: credit_wallet
+      summary: Top up a stored-value wallet (idempotent, D9).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, amount]
+              properties:
+                customer_id: { type: string }
+                amount: { $ref: "#/components/schemas/Money" }
+      responses:
+        "200":
+          description: Wallet credited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customer_id: { type: string }
+                  credited: { $ref: "#/components/schemas/Money" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/wallet/{customer_id}:
+    get:
+      operationId: get_wallet_balance
+      summary: Wallet balance for a customer.
+      parameters:
+        - name: customer_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The wallet balance.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customer_id: { type: string }
+                  balance: { $ref: "#/components/schemas/Money" }
         default:
           $ref: "#/components/responses/Error"
 components:
@@ -63,9 +170,12 @@ components:
       properties:
         payment_id: { type: string }
         order_id: { type: string }
-        status: { type: string, enum: [AUTHORIZED, CAPTURED, REFUNDED, FAILED] }
+        status: { type: string, enum: [AUTHORIZED, CAPTURED, REFUNDED, VOIDED, DECLINED, FAILED] }
         amount: { $ref: "#/components/schemas/Money" }
         authorized_at: { type: string }
+        capture_id: { type: string }
+        refund_id: { type: string }
+        method: { type: string }
     Error:
       type: object
       required: [error]
