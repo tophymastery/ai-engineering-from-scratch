@@ -1,0 +1,77 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T9 order saga slice (D22 CDC outbox/inbox + D9 idempotency). Panels bind to the metrics order exports (also driving deploy/alerts/order.yaml): the stuck-order SLO (< 0.05%/day), durable-timer fire lag (< 60s of due), the state-machine transition mix, exactly-once money invariants (zero duplicate charges), checkout p99 (< 800ms), and inbox DLQ depth. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Order — Checkout & saga: state machine, durable timers, exactly-once (V-T9)",
+  "uid": "order-v-t9",
+  "tags": ["marketplace", "order", "saga", "state-machine", "durable-timers", "idempotency", "exactly-once", "V-T9"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(order_created_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Stuck-order ratio (SLO < 0.05%/day)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.0005 } ] } } },
+      "targets": [
+        { "expr": "sum(order_stuck_orders) / clamp_min(sum(increase(order_created_total{region=~\"$region\"}[1d])), 1)", "legendFormat": "stuck ratio" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Durable-timer fire lag p99 (SLO < 60s of due)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 60 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(order_timer_fire_lag_seconds_bucket{region=~\"$region\"}[5m])) by (le))", "legendFormat": "timer fire lag p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "State-machine transitions by trigger",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(order_transitions_total{region=~\"$region\"}[5m])) by (trigger)", "legendFormat": "{{trigger}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Illegal transitions rejected (409) + compensations run",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(order_invalid_transition_total{region=~\"$region\"}[5m]))", "legendFormat": "409 invalid" },
+        { "expr": "sum(rate(order_compensation_total{region=~\"$region\"}[5m])) by (kind)", "legendFormat": "comp {{kind}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Exactly-once money invariant — duplicate charges (MUST be 0)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(increase(order_duplicate_charge_total{region=~\"$region\"}[1d]))", "legendFormat": "duplicate charges/day" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Checkout p99 (SLO < 800ms) + inbox DLQ depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.8 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(order_request_duration_seconds_bucket{route=\"/v1/orders\",region=~\"$region\"}[5m])) by (le))", "legendFormat": "checkout p99" },
+        { "expr": "sum(order_inbox_dlq_depth{region=~\"$region\"})", "legendFormat": "inbox DLQ depth" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+  labels:
+    app: order
+    shop.io/team: marketplace
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: order
+  template:
+    metadata:
+      labels:
+        app: order
+        shop.io/team: marketplace
+    spec:
+      containers:
+        - name: order
+          image: shop/order:latest
+          ports:
+            - containerPort: 8105
+          env:
+            - name: PORT
+              value: "8105"
+            - name: SERVICE_NAME
+              value: "order"
+            - name: ENV
+              value: "prod"
+            - name: REGION
+              value: "bkk"
+            # saga_v1 ships dark (04 §1.3 / 03 §5). Staging/preview overlays flip
+            # it on; prod is enabled via a canary-gated rollout.
+            - name: FLAG_SAGA_V1
+              value: "false"
+            # Payment slot for saga step 2 (authorize) / step 6 (capture) and the
+            # void/refund compensations — the order->payment contract + fakes.
+            - name: PAYMENT_URL
+              value: "http://payment:8106"
+            # Durable-timer sweeper tick. MUST be < 60s (the "fire within 60s of
+            # due" SLO); 5s gives wide margin.
+            - name: SWEEP_TICK
+              value: "5s"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8105
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8105
+            initialDelaySeconds: 2
+            periodSeconds: 10

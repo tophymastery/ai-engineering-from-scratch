@@ -1,0 +1,14 @@
+# Kustomize base for the V-T9 order saga slice (Marketplace team). Ships the
+# Deployment + Service alongside the other slice bases. Rendered + YAML-validated
+# by `make render-order` (mirrors `make render-cart` / `make render-pricing`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml

@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/order.settled/v1.schema.json",
+  "title": "order.settled v1",
+  "description": "Emitted by order (V-T9 saga) → payment, dispatch, notification, settlement. Key region:order_id (02 §4.3). D30: additive-only within this topic.",
+  "x-topic": "order.settled",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "order.settled" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "order" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["order_id", "settled_at"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "capture_id": { "type": "string" },
+        "settled_at": { "type": "string" }
+      }
+    }
+  }
+}

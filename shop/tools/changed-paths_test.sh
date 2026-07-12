@@ -33,9 +33,10 @@ check "service-only change" "$got" "services/_placeholder"
 # added services/identity-auth; V-T2 added services/identity-profile; V-T3 added
 # services/merchant-catalog; V-T4 added services/search-indexer + services/search-query;
 # V-T6 added services/feed-cache; V-T7 added services/cart; V-T8 added
-# services/pricing-promo — a shared-lib change fans out to all of them.
+# services/pricing-promo — a shared-lib change fans out to all of them; V-T9
+# added services/order (the saga orchestrator, which imports the same libs).
 got="$(printf '%s\n' 'libs/errors/errors.go' | "$CP" --stdin)"
-want="$(printf '%s\n' 'bffs/factories-ts' 'gateway' 'services/_placeholder' 'services/cart' 'services/fakes' 'services/feed-cache' 'services/identity-auth' 'services/identity-profile' 'services/merchant-catalog' 'services/pricing-promo' 'services/ranking' 'services/search-indexer' 'services/search-query' | sort -u)"
+want="$(printf '%s\n' 'bffs/factories-ts' 'gateway' 'services/_placeholder' 'services/cart' 'services/fakes' 'services/feed-cache' 'services/identity-auth' 'services/identity-profile' 'services/merchant-catalog' 'services/order' 'services/pricing-promo' 'services/ranking' 'services/search-indexer' 'services/search-query' | sort -u)"
 check "libs change = all" "$got" "$want"
 
 # Case 3: docs-only change => nothing.
