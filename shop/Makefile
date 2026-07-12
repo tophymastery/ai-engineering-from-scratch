@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf test-merchant-queue-perf render-feed-cache render-cart render-pricing render-order render-payment render-merchant-queue rebuild-merchant-queue e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf test-merchant-queue-perf test-dispatch-perf render-feed-cache render-cart render-pricing render-order render-payment render-merchant-queue rebuild-merchant-queue render-dispatch e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -43,6 +43,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/pricing-promo && $(GO) build ./...
 	@cd services/order && $(GO) build ./...
 	@cd services/payment && $(GO) build ./...
+	@cd services/dispatch && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -154,6 +155,10 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@$(MAKE) --no-print-directory test-merchant-queue-perf
 	@echo "== V-T11 rebuild tooling executed once (largest cell + full store rebuilt from the event log, 100% parity) =="
 	@$(MAKE) --no-print-directory rebuild-merchant-queue
+	@echo "== V-T12 dispatch & driver-offer (D13, -race): zone-owned batch matching (greedy-with-swaps >=10% better than greedy baseline) + 100% deterministic snapshot replay + exclusive 10s driver reservations (offer-conflict rate <0.5%, reservation-leak rate 0 over a 24h soak, no first-accept-wins 409) + zone single-writer + offer/accept flow + exactly-once inbox + event/HTTP contract-conformant + flag =="
+	@cd services/dispatch && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T12 perf criteria (no -race; race instrumentation invalidates latency): assignment p95<5s at 1.5x density =="
+	@$(MAKE) --no-print-directory test-dispatch-perf
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -258,6 +263,9 @@ test-order-perf: ## V-T9: order perf criteria (no -race): checkout p99<800ms
 test-merchant-queue-perf: ## V-T11: merchant-queue perf criteria (no -race): queue freshness p99<2s
 	@cd services/merchant-queue && $(GO) test -count=1 -run TestPerf ./...
 
+test-dispatch-perf: ## V-T12: dispatch perf criteria (no -race): assignment p95<5s at 1.5x density
+	@cd services/dispatch && $(GO) test -count=1 -run TestPerf ./...
+
 rebuild-merchant-queue: ## V-T11: run the D7 rebuild-from-events tool once (seed 10k orders, rebuild the largest cell + full store from the log, assert 100% parity, print wall time)
 	@cd services/merchant-queue && $(GO) run . -rebuild-demo -n 10000
 
@@ -318,6 +326,16 @@ render-merchant-queue: ## V-T11: render the merchant-queue base (Deployment+Serv
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/merchant-queue.yaml && $(GO) run . $$root/deploy/dashboards/merchant-queue.json ); \
 	  echo "render-merchant-queue: merchant-queue base (Deployment+Service) + freshness/parity/admission/checkout-5xx alerts + dashboard rendered/parsed"
+
+render-dispatch: ## V-T12: render the dispatch base (Deployment+Service) + lint the assignment-latency/offer-conflict/reservation-leak/replay-mismatch alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-dispatch.yaml; \
+	  $(KUSTOMIZE) build deploy/base/dispatch > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: dispatch' $$f || { echo "render-dispatch: dispatch Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-dispatch: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/dispatch.yaml && $(GO) run . $$root/deploy/dashboards/dispatch.json ); \
+	  echo "render-dispatch: dispatch base (Deployment+Service) + assignment-latency/offer-conflict/reservation-leak/replay-mismatch alerts + dashboard rendered/parsed"
 
 render-payment: ## V-T10: render the payment base (Deployment+Service) + lint the auth-rate/failure/duplicate-charge SLO alerts + dashboard
 	@set -e; root=$$PWD; f=$$root/.render-payment.yaml; \

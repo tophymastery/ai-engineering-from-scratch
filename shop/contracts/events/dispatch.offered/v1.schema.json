@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.shop.io/events/dispatch.offered/v1.schema.json",
+  "title": "dispatch.offered v1",
+  "description": "Emitted by dispatch (V-T12) when a driver is EXCLUSIVELY reserved and offered an order (D13). Explainability signal → driver-bff push, analytics. Key region:order_id (02 §4.3). D30: additive-only within this topic.",
+  "x-topic": "dispatch.offered",
+  "x-schema-version": 1,
+  "type": "object",
+  "required": ["event_id", "event_type", "occurred_at", "trace_id", "aggregate", "schema_version", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string" },
+    "event_type": { "const": "dispatch.offered" },
+    "occurred_at": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "aggregate": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "order" },
+        "id": { "type": "string" },
+        "region": { "type": "string" }
+      }
+    },
+    "schema_version": { "type": "integer" },
+    "payload": {
+      "type": "object",
+      "required": ["order_id", "driver_id", "offered_at"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "driver_id": { "type": "string", "description": "drv_ token — never PII (D3)." },
+        "pickup_eta_s": { "type": "integer" },
+        "offered_at": { "type": "string" }
+      }
+    }
+  }
+}

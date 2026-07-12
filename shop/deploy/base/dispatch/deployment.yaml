@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatch
+  labels:
+    app: dispatch
+    shop.io/team: logistics
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dispatch
+  template:
+    metadata:
+      labels:
+        app: dispatch
+        shop.io/team: logistics
+    spec:
+      containers:
+        - name: dispatch
+          image: shop/dispatch:latest
+          ports:
+            - containerPort: 8108
+          env:
+            - name: PORT
+              value: "8108"
+            - name: SERVICE_NAME
+              value: "dispatch"
+            - name: ENV
+              value: "prod"
+            - name: REGION
+              value: "bkk"
+            # dispatch_batch ships dark (04 §1.3 / 03 §5). Staging/preview overlays
+            # flip it on; prod is enabled via a canary-gated rollout.
+            - name: FLAG_DISPATCH_BATCH
+              value: "false"
+            # Kafka partition per H3 zone (D13): the single-writer-per-zone invariant
+            # pins each zone to one partition. Topology render-only in-sandbox.
+            - name: DISPATCH_PARTITIONS
+              value: "512"
+            # 1–2 s batch tick (D13). Exclusive driver reservation TTL before an offer.
+            - name: DISPATCH_TICK
+              value: "1500ms"
+            - name: RESERVATION_TTL
+              value: "10s"
+            # Order slot: an accepted offer drives the saga (dispatch.assigned →
+            # order ACCEPTED→DISPATCHED) via the order inbox.
+            - name: ORDER_URL
+              value: "http://order:8105"
+            # map-sim provides deterministic ETAs (S-T7); the in-process twin is used
+            # for byte-identical snapshot replay.
+            - name: MAP_SIM_URL
+              value: "http://map-sim:8092"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8108
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8108
+            initialDelaySeconds: 2
+            periodSeconds: 10

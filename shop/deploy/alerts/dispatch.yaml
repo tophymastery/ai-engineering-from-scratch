@@ -1,0 +1,81 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dispatch
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: logistics
+    slice: V-T12
+    decisions: D13
+spec:
+  groups:
+    # SLOs (V-T12, D13):
+    #   - assignment p95 < 5s (tick <=2s + offer <=3s) — the headline latency SLO
+    #   - offer-conflict rate < 0.5% (exclusive reservations replace 409 storms)
+    #   - reservation-leak rate 0 (every reservation consumed or released)
+    #   - deterministic snapshot replay 100% (batch is reproducible/explainable)
+    - name: dispatch.latency
+      rules:
+        - alert: DispatchAssignmentLatencyHigh
+          # THE assignment-latency alert (DoD): order-ready → driver assigned p95
+          # must stay under the 5s budget (tick <=2s + offer <=3s).
+          expr: histogram_quantile(0.95, sum(rate(dispatch_assignment_latency_seconds_bucket[5m])) by (le)) > 5
+          for: 5m
+          labels:
+            severity: critical
+            team: logistics
+          annotations:
+            summary: "dispatch assignment p95 > 5s (order-ready → driver assigned)"
+            description: "Batch assignment is slow: paid orders are not reaching an assigned driver within the 5s p95 budget. Check the per-zone tick duration (should be 1-2s), the offer-accept round-trip, driver supply density, and the map-sim ETA source. Runbook: docs/runbooks/dispatch.md."
+
+    - name: dispatch.reservations
+      rules:
+        - alert: DispatchOfferConflictRateHigh
+          # Exclusive short-TTL reservations REPLACE first-accept-wins 409s (D13).
+          # If the conflict rate climbs, two batches are contending for a driver —
+          # a zone-ownership / partition-assignment fault.
+          expr: sum(rate(dispatch_offer_conflicts_total[10m])) / clamp_min(sum(rate(dispatch_reserve_attempts_total[10m])), 1) > 0.005
+          for: 10m
+          labels:
+            severity: warning
+            team: logistics
+          annotations:
+            summary: "dispatch offer-conflict rate > 0.5%"
+            description: "Exclusive driver reservations are colliding above 0.5% — check zone→partition assignment (single-writer-per-zone) and reservation TTL. Runbook: docs/runbooks/dispatch.md."
+        - alert: DispatchReservationLeak
+          # Every reservation must be consumed by an accept or released on expiry.
+          # A nonzero leak means the sweeper is not reclaiming expired holds.
+          expr: sum(dispatch_reservation_leaked) > 0
+          for: 10m
+          labels:
+            severity: critical
+            team: logistics
+          annotations:
+            summary: "dispatch reservation leak detected (leaked > 0)"
+            description: "One or more driver reservations were neither consumed nor released — the reservation sweeper is not reclaiming expired holds, so drivers are stuck unofferable. Inspect the sweeper + the ledger accounting. Runbook: docs/runbooks/dispatch.md."
+
+    - name: dispatch.determinism
+      rules:
+        - alert: DispatchSnapshotReplayMismatch
+          # Each batch logs a deterministic snapshot; replay must reproduce identical
+          # assignments. A mismatch means nondeterminism leaked into the matcher.
+          expr: sum(dispatch_snapshot_replay_mismatches) > 0
+          for: 10m
+          labels:
+            severity: critical
+            team: logistics
+          annotations:
+            summary: "dispatch snapshot replay mismatch (nondeterminism detected)"
+            description: "Replaying a logged batch snapshot did not reproduce the recorded assignments — an unseeded clock/RNG or an impure ETA source leaked into the matcher. Freeze deploys and bisect. Runbook: docs/runbooks/dispatch.md."
+
+    - name: dispatch.inbox
+      rules:
+        - alert: DispatchInboxDLQDepthHigh
+          expr: sum(dispatch_inbox_dlq_depth) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: logistics
+          annotations:
+            summary: "dispatch consumer inbox DLQ not empty"
+            description: "order.paid / driver.location_updated events have exhausted retries and parked to the DLQ — the batch matcher is missing orders or driver locations. Inspect + replay with tools/dlqctl. Runbook: docs/runbooks/dispatch.md."
