@@ -1,7 +1,9 @@
 # 01 — Architecture: Microservices & BFF
 
-Go services on Kubernetes, one bounded context and one PostgreSQL database per
-service, Kafka as the async backbone, BFFs shaping payloads per client.
+Rust services on Kubernetes (async on tokio; axum for HTTP, tonic for gRPC,
+sqlx for PostgreSQL, rdkafka for Kafka), one bounded context and one PostgreSQL
+database per service, Kafka as the async backbone, BFFs shaping payloads per
+client. Backend language is Rust end-to-end per decision D31 (doc 05 §3.J).
 Sync calls (gRPC/HTTP) only for request/response reads and commands; every
 state change that other services care about is published as an event.
 
@@ -31,7 +33,8 @@ Rules that keep this catalog coherent:
 
 ## 2. BFF layer
 
-One BFF per client, TypeScript/NestJS, deployed like any other service:
+One BFF per client, Rust/axum (aggregation only, no business logic), deployed
+like any other service:
 
 | BFF | Client | Typical aggregation |
 |---|---|---|

@@ -9,8 +9,8 @@ deployable many times a day and debuggable across the whole cluster.
 
 ```
 repo/
-├── services/            # Go microservices (one dir each: order/, payment/, …)
-├── bffs/                # NestJS BFFs (customer/, merchant/, driver/, admin/)
+├── services/            # Rust microservices (one crate each: order/, payment/, …)
+├── bffs/                # Rust/axum BFFs (customer/, merchant/, driver/, admin/)
 ├── libs/                # shared: errors, idempotency, logging, otel, flags, factories
 ├── contracts/           # OpenAPI + event schemas + Pact broker config
 ├── deploy/
@@ -28,7 +28,7 @@ Path-based change detection builds only affected services (+ dependents via
 
 ```
 lint + typecheck
-  → unit (Go test -race / Jest)
+  → unit (cargo nextest; data-race freedom is a compile-time guarantee, loom for lock-free code)
   → contract (Pact verify against broker)
   → build images (multi-arch, SBOM, signed with cosign)
   → integration (Testcontainers: service + real PG/Kafka/Redis)

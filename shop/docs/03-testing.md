@@ -7,9 +7,9 @@ seed, exercise, and tear down — locally, in CI, and per pull request.
 
 | Layer | Scope | Tooling | Determinism lever |
 |---|---|---|---|
-| Unit | Pure logic: state machine, pricing math, dispatch scoring, idempotency middleware | Go `testing` / Jest | Injected `Clock` + seeded `Rand` (doc 01 §6) — no test ever reads wall time |
+| Unit | Pure logic: state machine, pricing math, dispatch scoring, idempotency middleware | `cargo test` / `cargo nextest` (`#[tokio::test]` for async) | Injected `Clock` + seeded `Rng` (doc 01 §6) — no test ever reads wall time |
 | Contract | Every BFF↔service and service↔service pair | Pact (consumer-driven); broker gates CI | Provider verification runs against pinned pacts; a service cannot merge a breaking change unnoticed |
-| Integration | One service + its real PG/Kafka/Redis | Testcontainers (ephemeral containers per test package) | Fresh containers or per-run schema ⇒ no shared state |
+| Integration | One service + its real PG/Kafka/Redis | `testcontainers-rs` (ephemeral containers per test binary) | Fresh containers or per-run schema ⇒ no shared state |
 | E2E | Whole system, real order lifecycle | Spawned stack (§2) + API-driven scenario runner | Seeded scenario data (§3) + fake providers (§5) |
 | Load/chaos | Peak-hour order surge; kill-a-pod during saga | k6 profiles; Litmus experiments | Runs against preview/staging envs with golden datasets |
 
@@ -37,7 +37,8 @@ Conventions that make spawning painless:
 
 ## 3. Test-data generation
 
-- **Factory library** (`libs/factories`, Go + TS mirrors): typed builders with
+- **Factory library** (`libs/factories`, a Rust crate; a TS mirror is kept only
+  for frontend test-data needs): typed builders with
   sensible defaults and overrides — `factory.Order(WithStatus(PAID),
   WithRegion("bkk"))`. Every entity has exactly one factory; tests never
   hand-roll JSON.
