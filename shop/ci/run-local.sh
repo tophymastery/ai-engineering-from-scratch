@@ -60,6 +60,7 @@ make render-order
 make render-payment
 make render-merchant-queue
 make render-dispatch
+make render-location
 
 step "[11/13] boot + seed (S-T7 demo-small via public APIs) + smoke"
 make up

@@ -1,0 +1,17 @@
+# Kustomize base for the V-T13 Driver telemetry plane slice (Location team; D14
+# telemetry ingest plane + D15 H3 geo store / telemetry tiering: location-gateway
+# gRPC-bidi/MQTT streams with auth-once + 100 ms batching, an H3 res-7 Redis geo
+# index with a kNN read contract, Flink 1:10 → Iceberg, PG trip summaries only).
+# Ships the Deployment + Service alongside the other slice bases. Rendered +
+# YAML-validated by `make render-location` (mirrors `make render-dispatch`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml

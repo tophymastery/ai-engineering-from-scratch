@@ -1,15 +1,135 @@
-# location-tracking.v1 — minimal S-T8 topology contract (01 §1 `location-tracking`).
-# One resource (+ runtime /healthz) so the E2E env boots a stub until V-T13 merges.
-# The real service uses map-sim ETAs. Grows additively per D30. Conventions (02 §1):
-# /v1 paths, snake_case, the 02 §2 error envelope on every non-2xx.
+# location-tracking.v1 — the Location team's telemetry-plane contract (01 §1
+# `location-tracking`; D14 ingest plane + D15 H3 geo store). The real service is
+# `location-gateway` (V-T13). Started as a minimal S-T8 stub (the /eta read);
+# GROWS ADDITIVELY per D30 with the V-T13 telemetry ingest + the kNN read contract
+# dispatch consumes. Conventions (02 §1): /v1 paths, snake_case, the 02 §2 error
+# envelope on every non-2xx. Everything is gated by telemetry_v2 in the service.
 openapi: 3.0.3
 info:
   title: location-tracking
-  version: "1.0.0"
-  description: Live driver GPS & ETA (01 §1). Minimal E2E stub — order ETA.
+  version: "1.1.0"
+  description: >
+    Driver telemetry plane (D14/D15). Drivers stream GPS to the per-cell
+    location-gateway (auth once per connection, 100 ms batching to the telemetry
+    topic); live positions land in an H3 res-7 geo index (30 s TTL) exposing a kNN
+    read (K nearest drivers to a point) that dispatch consumes. Raw frames are
+    downsampled 1:10 to Iceberg; PG keeps per-trip summaries only.
 servers:
   - url: https://api.shop.io
 paths:
+  /v1/telemetry:ingest:
+    post:
+      operationId: ingest_telemetry
+      summary: Stream a batch of driver positions on an authenticated stream (:action verb).
+      description: >
+        Auth happens ONCE per stream (the token authenticates the driver at open);
+        subsequent ingests reuse the stream. Frames are batched at 100 ms into the
+        telemetry topic and indexed into the H3 res-7 geo store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IngestRequest" }
+      responses:
+        "202":
+          description: Positions accepted for batched ingest.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestResult" }
+              example:
+                driver_id: "drv_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                stream_id: "strm_drv_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                accepted: 1
+                batched_100ms: true
+                auth_once: true
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/driver/positions:
+    post:
+      operationId: push_driver_position
+      summary: Driver-BFF position-stream endpoint — push a live position (auth once per stream).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IngestRequest" }
+      responses:
+        "202":
+          description: Position accepted for batched ingest.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestResult" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/drivers:nearby:
+    get:
+      operationId: nearby_drivers
+      summary: The kNN read contract — the K nearest live drivers to a point (dispatch consumes this).
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema: { type: number, example: 13.7460 }
+        - name: lng
+          in: query
+          required: true
+          schema: { type: number, example: 100.5340 }
+        - name: k
+          in: query
+          required: false
+          schema: { type: integer, default: 10, example: 10 }
+      responses:
+        "200":
+          description: The K nearest live drivers, nearest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NearbyResult" }
+              example:
+                query: { lat: 13.7460, lng: 100.5340, k: 10 }
+                count: 1
+                drivers:
+                  - driver_id: "drv_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T"
+                    lat: 13.7461
+                    lng: 100.5341
+                    distance_m: 13.4
+                    h3_cell: "h7_1238_9057"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/trips:close:
+    post:
+      operationId: close_trip
+      summary: Close a trip — write the ONE per-trip summary to PG (D15 tiering).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CloseTripRequest" }
+      responses:
+        "201":
+          description: Trip summary written.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trip_id, pg_row_written]
+                properties:
+                  trip_id: { type: string }
+                  pg_row_written: { type: integer }
+                  summary: { $ref: "#/components/schemas/TripSummary" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/admin/geo/stats:
+    get:
+      operationId: geo_stats
+      summary: Ingest / connection / skew stats (dashboards feed) — hottest-key fraction, produce errors, live drivers.
+      responses:
+        "200":
+          description: Telemetry-plane stats snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeoStats" }
+        default:
+          $ref: "#/components/responses/Error"
   /v1/orders/{order_id}/eta:
     get:
       operationId: get_order_eta
@@ -40,6 +160,103 @@ components:
       properties:
         lat: { type: number }
         lng: { type: number }
+    IngestPosition:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number }
+        lng: { type: number }
+        recorded_at: { type: string }
+    IngestRequest:
+      type: object
+      properties:
+        driver_id: { type: string, example: "drv_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+        token: { type: string, description: "Stream connection token (tok:<driver_id>). Auth once per stream." }
+        stream_id: { type: string }
+        lat: { type: number }
+        lng: { type: number }
+        positions:
+          type: array
+          items: { $ref: "#/components/schemas/IngestPosition" }
+    IngestResult:
+      type: object
+      required: [driver_id, accepted, batched_100ms, auth_once]
+      properties:
+        driver_id: { type: string }
+        stream_id: { type: string }
+        accepted: { type: integer }
+        batched_100ms: { type: boolean }
+        auth_once: { type: boolean }
+    Neighbor:
+      type: object
+      required: [driver_id, lat, lng, distance_m, h3_cell]
+      properties:
+        driver_id: { type: string }
+        lat: { type: number }
+        lng: { type: number }
+        distance_m: { type: number }
+        h3_cell: { type: string }
+        recorded_at: { type: string }
+    NearbyResult:
+      type: object
+      required: [count, drivers]
+      properties:
+        query:
+          type: object
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+            k: { type: integer }
+        count: { type: integer }
+        drivers:
+          type: array
+          items: { $ref: "#/components/schemas/Neighbor" }
+    CloseTripRequest:
+      type: object
+      required: [driver_id]
+      properties:
+        trip_id: { type: string }
+        driver_id: { type: string }
+        order_id: { type: string }
+        start_lat: { type: number }
+        start_lng: { type: number }
+        end_lat: { type: number }
+        end_lng: { type: number }
+    TripSummary:
+      type: object
+      required: [trip_id, driver_id, points]
+      properties:
+        trip_id: { type: string }
+        driver_id: { type: string }
+        order_id: { type: string }
+        points: { type: integer }
+        start_lat: { type: number }
+        start_lng: { type: number }
+        end_lat: { type: number }
+        end_lng: { type: number }
+        started_at: { type: string }
+        ended_at: { type: string }
+    GeoStats:
+      type: object
+      required: [live_drivers, produce_errors, hottest_key_fraction]
+      properties:
+        live_drivers: { type: integer }
+        open_streams: { type: integer }
+        auth_count: { type: integer }
+        messages: { type: integer }
+        produced: { type: integer }
+        produce_errors: { type: integer }
+        batches: { type: integer }
+        hottest_key: { type: string }
+        hottest_key_writes: { type: integer }
+        total_writes: { type: integer }
+        hottest_key_fraction: { type: number }
+        tiering:
+          type: object
+          properties:
+            raw_frames: { type: integer }
+            iceberg_rows: { type: integer }
+            pg_rows: { type: integer }
     Eta:
       type: object
       required: [order_id, eta_minutes]
@@ -75,7 +292,7 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
           example:
             error:
-              code: "ORDER_NOT_FOUND"
-              message: "No live track for ord_01H8…."
+              code: "TELEMETRY_DISABLED"
+              message: "The telemetry_v2 feature is not enabled."
               trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
               retryable: false

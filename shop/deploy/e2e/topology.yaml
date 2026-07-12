@@ -77,7 +77,14 @@ services:
   # e2e-sync` promotes it stub->real once the binary builds. The gateway routes
   # /dispatch/v1/* directly and passes /driver-bff/v1/driver/offers* here (offer/accept).
   - { name: dispatch,          port: 8108, mode: stub, contract: contracts/openapi/dispatch.v1.yaml,          real_cmd: "bash tools/dispatch-realcmd.sh" }
-  - { name: location-tracking, port: 8109, mode: stub, contract: contracts/openapi/location-tracking.v1.yaml, real_cmd: "" }
+  # location-tracking is the V-T13 slice (D14 telemetry ingest plane + D15 H3 geo
+  # store): real_cmd boots the built location-gateway binary
+  # (tools/location-tracking-realcmd.sh, telemetry_v2 on). It ingests simulated
+  # driver streams (auth-once + 100 ms batching) into an H3 res-7 geo index and
+  # serves the kNN read dispatch consumes. `make e2e-sync` promotes it stub->real
+  # once the binary builds. The gateway routes /location-tracking/v1/* directly and
+  # passes /driver-bff/v1/driver/positions here (the position-stream endpoint).
+  - { name: location-tracking, port: 8109, mode: stub, contract: contracts/openapi/location-tracking.v1.yaml, real_cmd: "bash tools/location-tracking-realcmd.sh" }
   - { name: notification,      port: 8110, mode: stub, contract: contracts/openapi/notification.v1.yaml,      real_cmd: "" }
   - { name: rating,            port: 8111, mode: stub, contract: contracts/openapi/rating.v1.yaml,            real_cmd: "" }
   - { name: settlement,        port: 8112, mode: stub, contract: contracts/openapi/settlement.v1.yaml,        real_cmd: "" }

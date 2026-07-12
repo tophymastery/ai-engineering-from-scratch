@@ -1,0 +1,78 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T13 Driver telemetry plane slice (Location team; D14 ingest plane + D15 H3 geo store/tiering). Ingest, connection, and skew panels bind to the metrics location-gateway exports (also driving deploy/alerts/location-gateway.yaml): gateway ingest latency p99 (< 5ms SLO), telemetry produce errors (= 0), kNN read latency p99 (< 10ms), hottest H3 key fraction of writes (< 2%), open streams + reconnect recovery seconds (< 60s, connection health), and the tiering ratios (raw vs Iceberg vs PG, PG writes/s per cell < 500). Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Location gateway — telemetry ingest, geo kNN, tiering (V-T13)",
+  "uid": "location-gateway-v-t13",
+  "tags": ["location", "telemetry", "ingest", "h3-geo", "knn", "tiering", "V-T13"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "cell", "type": "query", "query": "label_values(location_gateway_pg_writes_total, cell)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Gateway ingest latency p99 (SLO < 5ms, per-message)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.005 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(location_gateway_ingest_latency_seconds_bucket[5m])) by (le))", "legendFormat": "ingest p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Telemetry produce errors (SLO = 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(location_gateway_produce_errors_total[5m]))", "legendFormat": "produce errors/s" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "kNN read latency p99 (SLO < 10ms, nearby drivers)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.010 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(location_gateway_knn_latency_seconds_bucket[5m])) by (le))", "legendFormat": "kNN p99" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Hottest H3 geo key (SLO < 2% of writes — skew)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.02 } ] } } },
+      "targets": [
+        { "expr": "max(location_gateway_hottest_key_fraction)", "legendFormat": "hottest key fraction" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Open streams + reconnect recovery (connection health, recovery < 60s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "sum(location_gateway_open_streams)", "legendFormat": "open streams" },
+        { "expr": "max(location_gateway_reconnect_recovery_seconds)", "legendFormat": "reconnect recovery s" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Tiering — raw vs Iceberg (1:10) vs PG writes/s per cell (< 500)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 500 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(location_gateway_raw_frames_total[5m]))", "legendFormat": "raw frames/s" },
+        { "expr": "sum(rate(location_gateway_iceberg_rows_total[5m]))", "legendFormat": "iceberg rows/s (1:10)" },
+        { "expr": "sum(rate(location_gateway_pg_writes_total{cell=~\"$cell\"}[5m])) by (cell)", "legendFormat": "PG writes/s {{cell}}" }
+      ]
+    }
+  ]
+}

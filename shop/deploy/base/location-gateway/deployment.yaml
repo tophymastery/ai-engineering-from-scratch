@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: location-gateway
+  labels:
+    app: location-gateway
+    shop.io/team: location
+spec:
+  # Sized on CONNECTION COUNT (D14): each pod holds a slice of the driver fleet's
+  # persistent streams. HPA target is connections/pod, not CPU.
+  replicas: 4
+  selector:
+    matchLabels:
+      app: location-gateway
+  template:
+    metadata:
+      labels:
+        app: location-gateway
+        shop.io/team: location
+    spec:
+      containers:
+        - name: location-gateway
+          image: shop/location-gateway:latest
+          ports:
+            - containerPort: 8109
+          env:
+            - name: PORT
+              value: "8109"
+            - name: SERVICE_NAME
+              value: "location-gateway"
+            - name: ENV
+              value: "prod"
+            - name: REGION
+              value: "bkk"
+            # telemetry_v2 ships dark (04 §1.3 / 03 §5). Staging/preview overlays
+            # flip it on; prod is enabled via a canary-gated rollout.
+            - name: FLAG_TELEMETRY_V2
+              value: "false"
+            # D14: gateways batch 100 ms windows into the telemetry Kafka cluster
+            # (512 partitions/cell). Topology render-only in-sandbox.
+            - name: BATCH_WINDOW
+              value: "100ms"
+            - name: TELEMETRY_PARTITIONS
+              value: "512"
+            # D15: live positions in the H3 res-7 geo store with a 30 s TTL.
+            - name: GEO_TTL
+              value: "30s"
+            # 04 §2: INFO sampling on the ultra-hot location ingest path (errors
+            # never sampled — libs/logging always logs WARN+/errors in full).
+            - name: LOG_SAMPLE_RATE
+              value: "0.02"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8109
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8109
+            initialDelaySeconds: 2
+            periodSeconds: 10

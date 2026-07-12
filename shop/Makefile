@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf test-merchant-queue-perf test-dispatch-perf render-feed-cache render-cart render-pricing render-order render-payment render-merchant-queue rebuild-merchant-queue render-dispatch e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf test-payment-perf test-merchant-queue-perf test-dispatch-perf test-location-perf render-feed-cache render-cart render-pricing render-order render-payment render-merchant-queue rebuild-merchant-queue render-dispatch render-location e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -44,6 +44,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/order && $(GO) build ./...
 	@cd services/payment && $(GO) build ./...
 	@cd services/dispatch && $(GO) build ./...
+	@cd services/location-gateway && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -159,6 +160,10 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@cd services/dispatch && $(GO) vet ./... && $(GO) test -race -count=1 ./...
 	@echo "== V-T12 perf criteria (no -race; race instrumentation invalidates latency): assignment p95<5s at 1.5x density =="
 	@$(MAKE) --no-print-directory test-dispatch-perf
+	@echo "== V-T13 driver telemetry plane (D14/D15, -race): hottest H3 res-7 key <2% of writes (real write histogram + salting) + exact ring-expanding kNN (verified vs brute force) + auth-ONCE per stream (never per frame) + 100ms batching w/ zero produce errors + 100k reconnect storm recovered <60s (frozen clock) + 1:10 downsample->Iceberg & PG trip-summaries-only (PG writes <500/s per cell) + event/HTTP contract-conformant + flag =="
+	@cd services/location-gateway && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T13 perf criteria (no -race; race instrumentation invalidates latency): kNN p99<10ms @200k drivers + gateway ingest p99<5ms over a sustained burst =="
+	@$(MAKE) --no-print-directory test-location-perf
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -266,6 +271,9 @@ test-merchant-queue-perf: ## V-T11: merchant-queue perf criteria (no -race): que
 test-dispatch-perf: ## V-T12: dispatch perf criteria (no -race): assignment p95<5s at 1.5x density
 	@cd services/dispatch && $(GO) test -count=1 -run TestPerf ./...
 
+test-location-perf: ## V-T13: telemetry-plane perf criteria (no -race): kNN p99<10ms @200k drivers + gateway ingest p99<5ms
+	@cd services/location-gateway && $(GO) test -count=1 -run TestPerf ./plane/
+
 rebuild-merchant-queue: ## V-T11: run the D7 rebuild-from-events tool once (seed 10k orders, rebuild the largest cell + full store from the log, assert 100% parity, print wall time)
 	@cd services/merchant-queue && $(GO) run . -rebuild-demo -n 10000
 
@@ -336,6 +344,16 @@ render-dispatch: ## V-T12: render the dispatch base (Deployment+Service) + lint 
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/dispatch.yaml && $(GO) run . $$root/deploy/dashboards/dispatch.json ); \
 	  echo "render-dispatch: dispatch base (Deployment+Service) + assignment-latency/offer-conflict/reservation-leak/replay-mismatch alerts + dashboard rendered/parsed"
+
+render-location: ## V-T13: render the location-gateway base (Deployment+Service) + lint the ingest/produce-error/kNN/hot-key-skew/PG-write/reconnect alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-location.yaml; \
+	  $(KUSTOMIZE) build deploy/base/location-gateway > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: location-gateway' $$f || { echo "render-location: location-gateway Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-location: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/location-gateway.yaml && $(GO) run . $$root/deploy/dashboards/location-gateway.json ); \
+	  echo "render-location: location-gateway base (Deployment+Service) + ingest/produce-error/kNN/hot-key-skew/PG-write/reconnect alerts + dashboard rendered/parsed"
 
 render-payment: ## V-T10: render the payment base (Deployment+Service) + lint the auth-rate/failure/duplicate-charge SLO alerts + dashboard
 	@set -e; root=$$PWD; f=$$root/.render-payment.yaml; \

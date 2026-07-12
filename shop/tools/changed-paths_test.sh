@@ -37,9 +37,11 @@ check "service-only change" "$got" "services/_placeholder"
 # added services/order (the saga orchestrator, which imports the same libs);
 # V-T10 added services/payment (the money-mutation flagship, same libs);
 # V-T11 added services/merchant-queue (CQRS read model, same libs); V-T12 added
-# services/dispatch (the zone-owned batch matcher, same libs).
+# services/dispatch (the zone-owned batch matcher, same libs); V-T13 added
+# services/location-gateway (the driver telemetry plane — auth-once + 100ms batch
+# ingest, H3 res-7 geo kNN, telemetry tiering — importing the same libs).
 got="$(printf '%s\n' 'libs/errors/errors.go' | "$CP" --stdin)"
-want="$(printf '%s\n' 'bffs/factories-ts' 'gateway' 'services/_placeholder' 'services/cart' 'services/dispatch' 'services/fakes' 'services/feed-cache' 'services/identity-auth' 'services/identity-profile' 'services/merchant-catalog' 'services/merchant-queue' 'services/order' 'services/payment' 'services/pricing-promo' 'services/ranking' 'services/search-indexer' 'services/search-query' | sort -u)"
+want="$(printf '%s\n' 'bffs/factories-ts' 'gateway' 'services/_placeholder' 'services/cart' 'services/dispatch' 'services/fakes' 'services/feed-cache' 'services/identity-auth' 'services/identity-profile' 'services/location-gateway' 'services/merchant-catalog' 'services/merchant-queue' 'services/order' 'services/payment' 'services/pricing-promo' 'services/ranking' 'services/search-indexer' 'services/search-query' | sort -u)"
 check "libs change = all" "$got" "$want"
 
 # Case 3: docs-only change => nothing.

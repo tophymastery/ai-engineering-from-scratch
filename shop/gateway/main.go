@@ -82,6 +82,16 @@ var bffsWithQuotesPassthrough = []string{"customer-bff"}
 // contracts/openapi/driver-bff.v1.yaml + dispatch.v1.yaml.
 var bffsWithDispatchPassthrough = []string{"driver-bff"}
 
+// bffsWithPositionPassthrough are the BFF prefixes whose driver position-stream
+// path the gateway routes DIRECTLY to the location-tracking slot (V-T13 / D14 —
+// the driver streams GPS through the driver BFF's position-stream endpoint, behind
+// telemetry_v2). Same discover-from-route-table lifecycle: /driver-bff/v1/driver/
+// positions routes to the location-tracking slot (stable per-slot port survives
+// the stub->real swap). The telemetry_v2 flag is resolved INSIDE location-gateway
+// (not the gateway); the E2E env forces it on via the realcmd. Documented in
+// contracts/openapi/driver-bff.v1.yaml + location-tracking.v1.yaml.
+var bffsWithPositionPassthrough = []string{"driver-bff"}
+
 // backdoorHeaders are the D29 test backdoors. They are stripped unconditionally
 // at the edge in prod mode. Listing them here (for stripping) is NOT a leak of
 // the backdoor itself: the strip path contains no handler and no testhooks
@@ -349,6 +359,31 @@ func main() {
 		mux.Handle(bffPrefix+"v1/driver/offers", strip)
 		mux.Handle(bffPrefix+"v1/driver/offers/", strip)
 		log.Printf("dispatch passthrough %sv1/driver/offers* -> %s (dispatch)", bffPrefix, dispatchBase)
+	}
+
+	// --- V-T13 driver position-stream passthrough ---
+	// location-gateway owns the driver telemetry plane; the driver app streams GPS
+	// through the driver BFF's position-stream endpoint. Same discover-from-route-
+	// table pattern: /driver-bff/v1/driver/positions routes directly to the
+	// location-tracking slot (stable per-slot port survives the stub->real swap). A
+	// more specific pattern than the generic /driver-bff/ route, so ServeMux
+	// longest-prefix match sends the position stream here and leaves offers on
+	// dispatch and pickup/deliver on the driver-bff stub. Documented in
+	// contracts/openapi/driver-bff.v1.yaml + location-tracking.v1.yaml.
+	locationBase := upstreamFor(routes, "/location-tracking/")
+	for _, bff := range bffsWithPositionPassthrough {
+		bffPrefix := "/" + bff + "/"
+		if locationBase == "" || upstreamFor(routes, bffPrefix) == "" {
+			continue
+		}
+		lURL, err := url.Parse(locationBase)
+		if err != nil {
+			log.Fatalf("bad location-tracking upstream %q: %v", locationBase, err)
+		}
+		lProxy := httputil.NewSingleHostReverseProxy(lURL)
+		strip := http.StripPrefix("/"+bff, lProxy)
+		mux.Handle(bffPrefix+"v1/driver/positions", strip)
+		log.Printf("position passthrough %sv1/driver/positions -> %s (location-tracking)", bffPrefix, locationBase)
 	}
 
 	flagSet := flags.FromEnv()

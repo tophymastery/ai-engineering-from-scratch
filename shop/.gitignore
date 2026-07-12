@@ -15,6 +15,7 @@
 /services/payment/payment
 /services/merchant-queue/merchant-queue
 /services/dispatch/dispatch
+/services/location-gateway/location-gateway
 # S-T7 fake-provider binaries (services build to .run/ in process mode).
 /services/fakes/payment-sim/payment-sim
 /services/fakes/map-sim/map-sim
