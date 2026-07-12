@@ -1,0 +1,311 @@
+# merchant-queue.v1 — the V-T11 Merchant accept & order-queue service contract
+# (Marketplace team; D7 CQRS incoming-order read model + kitchen-capacity
+# admission tokens, D11 sharding by merchant_id). Single source of truth: slices
+# stub against this (tools/stubgen) and the Pact broker verifies providers.
+# Conventions (02 §1): /v1 paths, snake_case fields, prefixed ULIDs, integer
+# minor-unit money, RFC 3339 UTC _at fields, and the 02 §2 error envelope on
+# EVERY non-2xx. This service backs the merchant-bff incoming-order-queue +
+# accept surface; all endpoints are gated by the merchant_queue_v1 flag.
+openapi: 3.0.3
+info:
+  title: merchant-queue
+  version: "1.0.0"
+  description: "Merchant incoming-order queue (CQRS read model projected from order.* events, sharded by merchant_id) + accept/reject that drives the order saga, admission-gated by kitchen capacity (30 accepts/10 min, merchant-tunable) which inflates the quoted prep ETA + shows a busy badge instead of failing checkout (D7/D11)."
+servers:
+  - url: https://api.shop.io
+paths:
+  /v1/merchant/orders:
+    get:
+      operationId: list_incoming_orders
+      summary: The merchant incoming-order queue (orders awaiting accept). Read model.
+      parameters:
+        - name: merchant_id
+          in: query
+          required: true
+          schema: { type: string, example: "mer_01H8XGABCDE" }
+        - name: state
+          in: query
+          required: false
+          description: "Queue state filter (default PENDING = awaiting accept; ALL for every state)."
+          schema: { type: string, example: "PENDING" }
+      responses:
+        "200":
+          description: The merchant's incoming-order queue + current admission state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Queue" }
+              example:
+                merchant_id: "mer_01H8XGABCDE"
+                count: 1
+                orders:
+                  - { order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", merchant_id: "mer_01H8XGABCDE", queue_state: "PENDING", shard: 42, cell: 2 }
+                capacity: { merchant_id: "mer_01H8XGABCDE", accepts_per_window: 30, window_minutes: 10, used: 0, remaining: 30, busy: false, prep_eta_minutes: 15, pending_count: 1 }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/merchant/orders/{order_id}:
+    get:
+      operationId: get_incoming_order
+      summary: One incoming-order queue entry.
+      parameters:
+        - $ref: "#/components/parameters/OrderID"
+      responses:
+        "200":
+          description: The queue entry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueRow" }
+              example: { order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", merchant_id: "mer_01H8XGABCDE", queue_state: "PENDING", shard: 42, cell: 2 }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/merchant/orders/{order_id}:accept:
+    post:
+      operationId: accept_order
+      summary: Merchant accepts an incoming (PAID) order — drives the saga (order.accepted). :action verb. Admission-gated; at capacity the accept is DEFERRED with a busy badge + inflated ETA (200, not a failure).
+      parameters:
+        - $ref: "#/components/parameters/OrderID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Order accepted (PAID→ACCEPTED), OR deferred with a busy badge when the kitchen is at capacity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptAck" }
+              example: { order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", status: "ACCEPTED", busy: false, prep_eta_minutes: 18 }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/merchant/orders/{order_id}:reject:
+    post:
+      operationId: reject_order
+      summary: Merchant rejects an incoming order — drives the saga (order.cancelled, refund). :action verb.
+      parameters:
+        - $ref: "#/components/parameters/OrderID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Order rejected (cancelled + refunded).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcceptAck" }
+              example: { order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", status: "REJECTED" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/merchant/{merchant_id}/capacity:
+    get:
+      operationId: get_kitchen_capacity
+      summary: Kitchen-capacity admission state — the busy badge + quoted prep ETA.
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+      responses:
+        "200":
+          description: Current admission state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Capacity" }
+              example: { merchant_id: "mer_01H8XGABCDE", accepts_per_window: 30, window_minutes: 10, used: 12, remaining: 18, busy: false, prep_eta_minutes: 15, pending_count: 3 }
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: set_kitchen_capacity
+      summary: Tune the kitchen capacity (merchant-tunable admission tokens).
+      parameters:
+        - $ref: "#/components/parameters/MerchantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accepts_per_window]
+              properties:
+                accepts_per_window: { type: integer, example: 50 }
+                window_minutes: { type: integer, example: 10 }
+            example: { accepts_per_window: 50, window_minutes: 10 }
+      responses:
+        "200":
+          description: Capacity updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Capacity" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/order-events:
+    post:
+      operationId: inject_order_event
+      summary: Ingest an order.* event envelope into the projection (E2E stub-event path + inbox exactly-once).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventEnvelope" }
+      responses:
+        "202":
+          description: Event accepted (projected exactly-once).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applied: { type: boolean }
+                  event_type: { type: string }
+                  order_id: { type: string }
+                  queue_state: { type: string }
+              example: { applied: true, event_type: "order.paid", order_id: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T", queue_state: "PENDING" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/admin/rebuild:
+    post:
+      operationId: rebuild_read_model
+      summary: Rebuild the read model (or one cell) from the append-only event log; asserts parity with the live model (D7 Tier-1 rebuild-from-events).
+      parameters:
+        - name: cell
+          in: query
+          required: false
+          description: "Physical cell to rebuild (omit for the whole store)."
+          schema: { type: integer, example: 2 }
+      responses:
+        "200":
+          description: Rebuild result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cell: { type: integer }
+                  orders: { type: integer }
+                  events: { type: integer }
+                  duration_ms: { type: integer }
+                  parity_ok: { type: boolean }
+                  mismatches: { type: integer }
+              example: { cell: 2, orders: 2500, events: 8123, duration_ms: 412, parity_ok: true, mismatches: 0 }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/admin/freshness:
+    get:
+      operationId: get_queue_freshness
+      summary: Projection-lag (order.paid → visible) stats for the freshness dashboard.
+      responses:
+        "200":
+          description: Freshness stats.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  samples: { type: integer }
+                  p50_ms: { type: number }
+                  p99_ms: { type: number }
+                  budget_ms: { type: integer }
+              example: { samples: 5000, p50_ms: 0.05, p99_ms: 0.4, budget_ms: 2000 }
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    OrderID:
+      name: order_id
+      in: path
+      required: true
+      schema: { type: string, example: "ord_01H8XGJ2Q7Z9BQ3M4N5P6R7S8T" }
+    MerchantID:
+      name: merchant_id
+      in: path
+      required: true
+      schema: { type: string, example: "mer_01H8XGABCDE" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated ULID/UUID (02 §3).
+      schema: { type: string }
+  schemas:
+    QueueRow:
+      type: object
+      required: [order_id, queue_state]
+      properties:
+        order_id: { type: string }
+        merchant_id: { type: string }
+        shard: { type: integer }
+        cell: { type: integer }
+        customer_id: { type: string }
+        total_minor: { type: integer }
+        currency: { type: string }
+        queue_state: { type: string, enum: [CREATED, PENDING, ACCEPTED, REJECTED, CANCELLED, DISPATCHED, PICKED_UP, DELIVERED, SETTLED] }
+        phase: { type: integer }
+    Capacity:
+      type: object
+      required: [merchant_id, accepts_per_window, window_minutes, used, remaining, busy, prep_eta_minutes]
+      properties:
+        merchant_id: { type: string }
+        accepts_per_window: { type: integer }
+        window_minutes: { type: integer }
+        used: { type: integer }
+        remaining: { type: integer }
+        busy: { type: boolean }
+        prep_eta_minutes: { type: integer }
+        pending_count: { type: integer }
+    Queue:
+      type: object
+      required: [merchant_id, count, orders]
+      properties:
+        merchant_id: { type: string }
+        count: { type: integer }
+        orders:
+          type: array
+          items: { $ref: "#/components/schemas/QueueRow" }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+    AcceptAck:
+      type: object
+      required: [order_id, status]
+      properties:
+        order_id: { type: string }
+        status: { type: string, enum: [ACCEPTED, REJECTED, PENDING] }
+        busy: { type: boolean }
+        deferred: { type: boolean }
+        prep_eta_minutes: { type: integer }
+        message: { type: string }
+    EventEnvelope:
+      type: object
+      required: [event_type, aggregate, payload]
+      properties:
+        event_id: { type: string }
+        event_type: { type: string }
+        occurred_at: { type: string }
+        trace_id: { type: string }
+        aggregate:
+          type: object
+          properties:
+            type: { type: string }
+            id: { type: string }
+            region: { type: string }
+        schema_version: { type: integer }
+        payload: { type: object }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  reason: { type: string }
+            trace_id: { type: string }
+            retryable: { type: boolean }
+  responses:
+    Error:
+      description: "The 02 §2 error envelope — returned on every non-2xx."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: "QUEUE_ORDER_NOT_PENDING"
+              message: "The order is not awaiting merchant acceptance."
+              trace_id: "4bf92f3577b34da6a3ce929d0e0e4736"
+              retryable: false

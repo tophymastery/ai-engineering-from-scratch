@@ -58,6 +58,7 @@ make render-cart
 make render-pricing
 make render-order
 make render-payment
+make render-merchant-queue
 
 step "[11/13] boot + seed (S-T7 demo-small via public APIs) + smoke"
 make up

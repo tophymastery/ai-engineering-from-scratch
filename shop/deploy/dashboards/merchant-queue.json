@@ -1,0 +1,86 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T11 Merchant accept & order-queue slice (D7 CQRS read model + kitchen-capacity admission tokens, D11 sharding by merchant_id). Panels bind to the metrics merchant-queue exports (also driving deploy/alerts/merchant-queue.yaml): queue freshness p99 (< 2s from order.paid), projection parity (rebuild mismatches = 0), admission accept-rate vs configured capacity (± 5%), busy-badge/deferred-accept rate, checkout 5xx (must be 0), per-cell queue depth, and inbox DLQ depth. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Merchant Queue — incoming-order CQRS + kitchen-capacity admission (V-T11)",
+  "uid": "merchant-queue-v-t11",
+  "tags": ["marketplace", "merchant-queue", "cqrs", "read-model", "admission", "sharding", "V-T11"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "cell", "type": "query", "query": "label_values(merchant_queue_orders_total, cell)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Queue freshness p99 (SLO < 2s from order.paid)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(merchant_queue_projection_lag_seconds_bucket[5m])) by (le))", "legendFormat": "freshness p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Projection parity — rebuild mismatches (must be 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(merchant_queue_rebuild_parity_mismatches)", "legendFormat": "parity mismatches" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Admission — admitted accept rate vs configured capacity (± 5%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(merchant_queue_accepts_admitted_total[10m]))", "legendFormat": "admitted/s" },
+        { "expr": "sum(merchant_queue_capacity_tokens) / 600", "legendFormat": "configured capacity/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Busy badge — deferred accepts (capacity pressure, NOT failures)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(merchant_queue_accepts_deferred_total[5m]))", "legendFormat": "deferred (busy)" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Checkout 5xx on the queue path (INVARIANT: 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(increase(merchant_queue_checkout_5xx_total[5m]))", "legendFormat": "checkout 5xx" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Incoming-queue depth by cell (D11 sharding)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "expr": "sum(merchant_queue_pending_orders{cell=~\"$cell\"}) by (cell)", "legendFormat": "cell {{cell}} pending" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Projection inbox DLQ depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(merchant_queue_inbox_dlq_depth)", "legendFormat": "dlq depth" }
+      ]
+    }
+  ]
+}

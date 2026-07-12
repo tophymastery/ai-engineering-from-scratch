@@ -1,0 +1,81 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: merchant-queue
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: marketplace
+    slice: V-T11
+    decisions: D7-D11
+spec:
+  groups:
+    # SLOs (V-T11):
+    #   - queue freshness p99 < 2s from order.paid (the read-model lag SLO)
+    #   - projection parity 100% (the read model matches the event log)
+    #   - admission accept-rate = configured capacity ± 5% (kitchen back-pressure)
+    #   - checkout never fails under a flash sale (busy badge, not 5xx)
+    - name: merchant-queue.freshness
+      rules:
+        - alert: MerchantQueueFreshnessLagHigh
+          # The read-model freshness SLO: order.paid → visible in the merchant
+          # queue within 2s p99.
+          expr: histogram_quantile(0.99, sum(rate(merchant_queue_projection_lag_seconds_bucket[5m])) by (le)) > 2
+          for: 5m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "merchant-queue freshness p99 > 2s (order.paid → visible)"
+            description: "The CQRS projection is lagging: paid orders are not appearing in the merchant incoming queue within 2s p99. Check the order.* inbox consumer lag, DLQ depth, and the per-cell projection workers. Runbook: docs/runbooks/merchant-queue.md."
+
+    - name: merchant-queue.parity
+      rules:
+        - alert: MerchantQueueProjectionParityDrift
+          # The read model MUST equal a fold over the event log. A nonzero rebuild
+          # parity mismatch means the projection drifted.
+          expr: sum(merchant_queue_rebuild_parity_mismatches) > 0
+          for: 10m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "merchant-queue projection parity drift detected"
+            description: "A rebuild-from-log parity check found rows where the live read model disagrees with the event log. Freeze writes for the affected cell, run `POST /v1/admin/rebuild?cell=N`, and inspect the inbox. Runbook: docs/runbooks/merchant-queue.md."
+
+    - name: merchant-queue.admission
+      rules:
+        - alert: MerchantQueueAcceptRateOffCapacity
+          # Kitchen-capacity admission: the admitted accept rate should track the
+          # configured capacity within ± 5%. A large deviation means the token
+          # bucket is mis-metering (leak or over-throttle).
+          expr: abs(sum(rate(merchant_queue_accepts_admitted_total[10m])) - sum(merchant_queue_capacity_tokens)) / clamp_min(sum(merchant_queue_capacity_tokens), 1) > 0.05
+          for: 15m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "merchant-queue accept rate off configured capacity by > 5%"
+            description: "The admitted accept rate has drifted more than 5% from the configured kitchen capacity. Check the admission token ledger (Redis) and per-merchant capacity config. Runbook: docs/runbooks/merchant-queue.md."
+        - alert: MerchantQueueCheckout5xx
+          # The headline invariant: a flash sale must NEVER fail checkout — capacity
+          # pressure inflates the ETA + shows a busy badge, it does not 5xx.
+          expr: sum(increase(merchant_queue_checkout_5xx_total[5m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "merchant-queue emitted a checkout 5xx under load"
+            description: "The queue/admission path returned a 5xx on the checkout hot path — capacity pressure must degrade to a busy badge + inflated ETA, never a failure. Page Marketplace. Runbook: docs/runbooks/merchant-queue.md."
+
+    - name: merchant-queue.inbox
+      rules:
+        - alert: MerchantQueueInboxDLQDepthHigh
+          expr: sum(merchant_queue_inbox_dlq_depth) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "merchant-queue projection inbox DLQ not empty"
+            description: "order.* events have exhausted retries and parked to the DLQ — the read model is missing updates. Inspect + replay with tools/dlqctl, then rebuild. Runbook: docs/runbooks/merchant-queue.md."

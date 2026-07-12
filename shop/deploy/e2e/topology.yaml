@@ -59,6 +59,12 @@ services:
   # (checkout/get/cancel passthrough) and /order/v1/* directly.
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "bash tools/order-realcmd.sh" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "bash tools/payment-realcmd.sh" }
+  # merchant-queue is the V-T11 slice (D7 CQRS read model + admission tokens, D11
+  # sharding by merchant_id): real_cmd boots the built binary
+  # (tools/merchant-queue-realcmd.sh, merchant_queue_v1 on; ORDER_URL->order slot
+  # so an admitted accept drives the saga). `make e2e-sync` promotes it stub->real
+  # once the binary builds. The gateway routes /merchant-queue/v1/* directly.
+  - { name: merchant-queue,    port: 8117, mode: stub, contract: contracts/openapi/merchant-queue.v1.yaml,    real_cmd: "bash tools/merchant-queue-realcmd.sh" }
   # pricing-promo is the V-T8 slice (D10): real_cmd boots the built binary
   # (tools/pricing-realcmd.sh, pricing_v1 on; CART_URL->cart slot for the
   # subtotal read, the pricing-promo->cart pact). `make e2e-sync` promotes it

@@ -15,6 +15,7 @@ services:
   feed-cache:        { team: "Discovery",        slice: "V-T6"  }
   cart:              { team: "Marketplace",      slice: "V-T7"  }
   order:             { team: "Marketplace",      slice: "V-T9"  }
+  merchant-queue:    { team: "Marketplace",      slice: "V-T11" }
   payment:           { team: "Payments",         slice: "V-T10" }
   pricing-promo:     { team: "Growth",           slice: "V-T8"  }
   dispatch:          { team: "Logistics",        slice: "V-T12" }

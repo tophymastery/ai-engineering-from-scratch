@@ -1,0 +1,15 @@
+# Kustomize base for the V-T11 Merchant accept & order-queue slice (Marketplace
+# team; D7 CQRS read model + admission tokens, D11 sharding by merchant_id).
+# Ships the Deployment + Service alongside the other slice bases. Rendered +
+# YAML-validated by `make render-merchant-queue` (mirrors `make render-order`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shop
+    includeSelectors: false
+
+resources:
+  - deployment.yaml
+  - service.yaml
