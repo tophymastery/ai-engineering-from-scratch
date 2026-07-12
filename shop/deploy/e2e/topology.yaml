@@ -52,7 +52,12 @@ services:
   # add-time item-validation read; consumes menu.updated via /v1/menu-events).
   # `make e2e-sync` promotes it stub->real once the binary builds.
   - { name: cart,              port: 8104, mode: stub, contract: contracts/openapi/cart.v1.yaml,              real_cmd: "bash tools/cart-realcmd.sh" }
-  - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "" }
+  # order is the V-T9 slice (D22/D9): real_cmd boots the built binary
+  # (tools/order-realcmd.sh, saga_v1 on; PAYMENT_URL->payment-sim for the
+  # authorize/capture/void saga steps). `make e2e-sync` promotes it stub->real
+  # once the binary builds. The gateway routes /customer-bff/v1/orders* here
+  # (checkout/get/cancel passthrough) and /order/v1/* directly.
+  - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "bash tools/order-realcmd.sh" }
   - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }
   # pricing-promo is the V-T8 slice (D10): real_cmd boots the built binary
   # (tools/pricing-realcmd.sh, pricing_v1 on; CART_URL->cart slot for the

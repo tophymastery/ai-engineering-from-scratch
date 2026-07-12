@@ -575,6 +575,71 @@ else
   if [[ "$TB" == *'QUOTE_INVALID'* ]]; then pass "422 envelope carries QUOTE_INVALID code (02 §2)"; else bad "422 body missing QUOTE_INVALID (${TB:0:160})"; fi
 fi
 
+# --- V-T9 order saga (D22/D9): full checkout->payment->accept->deliver through
+# the REAL order service behind saga_v1, plus an idempotent double-tap and a
+# compensation (cancel) assertion — GATED on the order slot being REAL. The saga
+# steps other services own (merchant accept, dispatch, driver scans) are injected
+# as the payment/dispatch/driver domain events the order service consumes
+# exactly-once (its /v1/order-events stub-event path — the same inbox a live
+# Kafka feed would drive). Proves: checkout mints PAYMENT_PENDING; a double "Pay"
+# tap with one Idempotency-Key yields ONE order (replayed); events walk the state
+# machine PAID->ACCEPTED->DISPATCHED->PICKED_UP->DELIVERED; a cancel compensates. ---
+echo "== V-T9 order saga (checkout -> payment.authorized -> accept -> dispatch -> deliver + idempotent double-tap + cancel, via the real order service) =="
+ORDER_MODE="$(awk -F'\t' '$1=="order"{print $3}' "$RUN/plan.tsv" 2>/dev/null)"
+if [ "$ORDER_MODE" != "real" ]; then
+  echo "  SKIP: order slot mode='$ORDER_MODE' (not real) — V-T9 deep section runs only when order is the real slot"
+else
+  inj() { # inj <event_type> <order_id> <event_id>
+    curl -s --max-time 8 -X POST "$GW/order/v1/order-events" -H 'Content-Type: application/json' \
+      -d '{"event_id":"'"$3"'","event_type":"'"$1"'","occurred_at":"2026-07-12T09:00:00Z","trace_id":"t_e2e","aggregate":{"type":"order","id":"'"$2"'","region":"bkk"},"schema_version":1,"payload":{"order_id":"'"$2"'"}}' 2>/dev/null
+  }
+  ostatus() { curl -s --max-time 8 "$GW/order/v1/orders/$1" 2>/dev/null; }
+
+  VK="idem_vt9_$$"
+  VBODY='{"quote_id":"qot_vt9","payment_method_id":"pm_vt9","total":{"amount":42550,"currency":"THB"}}'
+  # 1. checkout -> PAYMENT_PENDING.
+  OC="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders" -H 'Content-Type: application/json' -H "Idempotency-Key: $VK" -d "$VBODY" 2>/dev/null)"
+  OID="$(printf '%s' "$OC" | sed -n 's/.*"order_id":"\([^"]*\)".*/\1/p')"
+  if [ -n "$OID" ] && [[ "$OC" == *'"status":"PAYMENT_PENDING"'* ]]; then pass "checkout minted order $OID in PAYMENT_PENDING"; else bad "checkout failed (${OC:0:200})"; fi
+
+  # 2. idempotent DOUBLE-TAP: same Idempotency-Key => SAME order, replay header.
+  RH="$(curl -s -D - -o /dev/null --max-time 8 -X POST "$GW/order/v1/orders" -H 'Content-Type: application/json' -H "Idempotency-Key: $VK" -d "$VBODY" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="idempotency-replayed"{print $2}')"
+  OC2="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders" -H 'Content-Type: application/json' -H "Idempotency-Key: $VK" -d "$VBODY" 2>/dev/null)"
+  OID2="$(printf '%s' "$OC2" | sed -n 's/.*"order_id":"\([^"]*\)".*/\1/p')"
+  if [ "$RH" = "true" ] && [ "$OID2" = "$OID" ]; then pass "double-tap replays ONE order (Idempotency-Replayed: true, same order_id)"; else bad "double-tap not idempotent (replay='$RH' oid2='$OID2' want '$OID')"; fi
+
+  # 3. payment.authorized -> PAID (exactly-once inbox).
+  inj payment.authorized "$OID" "evt_vt9_auth_$$" >/dev/null
+  if [[ "$(ostatus "$OID")" == *'"status":"PAID"'* ]]; then pass "payment.authorized advanced order to PAID"; else bad "order not PAID after payment.authorized (${OID})"; fi
+  # 3b. Kafka redelivery of the SAME event_id => still exactly one effect (PAID).
+  inj payment.authorized "$OID" "evt_vt9_auth_$$" >/dev/null
+  if [[ "$(ostatus "$OID")" == *'"status":"PAID"'* ]]; then pass "redelivered payment.authorized (same event_id) is a no-op (still PAID)"; else bad "redelivery changed state (${OID})"; fi
+
+  # 4. merchant accept -> ACCEPTED.
+  AC="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders/$OID:accept" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  if [[ "$AC" == *'"status":"ACCEPTED"'* ]]; then pass "merchant accept -> ACCEPTED"; else bad "accept failed (${AC:0:160})"; fi
+
+  # 5. dispatch.assigned -> DISPATCHED.
+  inj dispatch.assigned "$OID" "evt_vt9_dsp_$$" >/dev/null
+  if [[ "$(ostatus "$OID")" == *'"status":"DISPATCHED"'* ]]; then pass "dispatch.assigned -> DISPATCHED"; else bad "order not DISPATCHED (${OID})"; fi
+
+  # 6. driver pickup + delivery -> PICKED_UP -> DELIVERED.
+  inj driver.picked_up "$OID" "evt_vt9_pick_$$" >/dev/null
+  if [[ "$(ostatus "$OID")" == *'"status":"PICKED_UP"'* ]]; then pass "driver.picked_up -> PICKED_UP"; else bad "order not PICKED_UP (${OID})"; fi
+  inj driver.delivered "$OID" "evt_vt9_deliv_$$" >/dev/null
+  if [[ "$(ostatus "$OID")" == *'"status":"DELIVERED"'* ]]; then pass "driver.delivered -> DELIVERED (full happy path)"; else bad "order not DELIVERED (${OID})"; fi
+
+  # 7. COMPENSATION: a fresh order cancelled from PAYMENT_PENDING -> CANCELLED.
+  CK="idem_vt9_cancel_$$"
+  CC="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders" -H 'Content-Type: application/json' -H "Idempotency-Key: $CK" -d "$VBODY" 2>/dev/null)"
+  CID="$(printf '%s' "$CC" | sed -n 's/.*"order_id":"\([^"]*\)".*/\1/p')"
+  CANC="$(curl -s --max-time 8 -X POST "$GW/order/v1/orders/$CID:cancel" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  if [[ "$CANC" == *'"status":"CANCELLED"'* ]]; then pass "cancel from PAYMENT_PENDING -> CANCELLED (compensation/void)"; else bad "cancel failed (${CANC:0:160})"; fi
+  # 8. illegal transition -> 409 ORDER_INVALID_TRANSITION (accept a cancelled order).
+  IC="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "$GW/order/v1/orders/$CID:accept" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"
+  if [ "$IC" = 409 ]; then pass "illegal transition (accept a CANCELLED order) -> 409 ORDER_INVALID_TRANSITION"; else bad "illegal transition -> $IC (want 409)"; fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   echo "e2e-smoke: GREEN — $step/$step assertions passed (checkout->delivery across the full topology)"

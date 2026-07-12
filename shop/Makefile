@@ -17,7 +17,7 @@ FAKES := payment-sim map-sim notify-sink
 .PHONY: help up down seed smoke test test-libs test-fakes test-seed render changed build \
         backdoor-scan security-scan preview preview-isolation strip-test render-preview \
         contract-validate pact-verify render-events dlqctl-demo pii-scan render-profile render-catalog render-search render-ranking \
-        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf render-feed-cache render-cart render-pricing e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
+        test-search-perf test-ranking-perf test-feedcache-perf test-cart-perf test-pricing-perf test-order-perf render-feed-cache render-cart render-pricing render-order e2e-up e2e-down e2e-smoke e2e-swap e2e-sync post-merge-smoke
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -41,6 +41,7 @@ build: ## Compile the shared libs + gateway + placeholder + fakes + tools (prod 
 	@cd services/feed-cache && $(GO) build ./...
 	@cd services/cart && $(GO) build ./...
 	@cd services/pricing-promo && $(GO) build ./...
+	@cd services/order && $(GO) build ./...
 	@cd gateway && $(GO) build ./...
 	@set -e; for s in $(FAKES); do (cd services/fakes/$$s && $(GO) build ./...); done
 	@cd contracts/registryctl && $(GO) build ./...
@@ -138,6 +139,10 @@ test: ## Run scaffold tests (Go vet/build both tags + change-detection fixture) 
 	@$(MAKE) --no-print-directory test-pricing-perf
 	@echo "== V-T8 key-rotation LIVE rehearsal (real pricing-promo: add B -> overlap A still verifies -> retire A) =="
 	@bash tools/rotate-quote-keys-demo.sh
+	@echo "== V-T9 order saga (D22/D9, -race): EVERY state-machine transition (15 legal + 135 illegal=>409) + every compensation path + 1000-timer crash-and-fire (100% within 60s of due) + exactly-one-effect (double-tap+retry+redelivery) + auto-remediation (<16min, once) + event/HTTP contract-conformant + flag =="
+	@cd services/order && $(GO) vet ./... && $(GO) test -race -count=1 ./...
+	@echo "== V-T9 perf criteria (no -race; race instrumentation invalidates latency): checkout p99<800ms =="
+	@$(MAKE) --no-print-directory test-order-perf
 	@cd gateway && $(GO) test -race -count=1 ./...
 	@echo "== stubgen + e2ectl (S-T8 topology tooling) vet + test =="
 	@cd tools/stubgen && $(GO) vet ./... && $(GO) test -count=1 ./...
@@ -236,6 +241,9 @@ test-feedcache-perf: ## V-T6: feed-cache perf criteria (no -race): 1M-request co
 test-cart-perf: ## V-T7: cart perf criteria (no -race): add/get/remove p99<100ms + concurrency burst
 	@cd services/cart && $(GO) test -count=1 -run TestPerf ./...
 
+test-order-perf: ## V-T9: order perf criteria (no -race): checkout p99<800ms
+	@cd services/order && $(GO) test -count=1 -run TestPerf ./...
+
 test-pricing-perf: ## V-T8: pricing perf criteria (no -race): quote p99<300ms + concurrency burst
 	@cd services/pricing-promo && $(GO) test -count=1 -run TestPerf ./...
 
@@ -270,6 +278,16 @@ render-feed-cache: ## V-T6/D11+D17: render the feed-cache base (Deployment[+CDN-
 	  rm -f $$f; \
 	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/feed-cache.yaml && $(GO) run . $$root/deploy/dashboards/feed-cache.json ); \
 	  echo "render-feed-cache: feed-cache base (Deployment+Service+CDN-front) + stampede/hit-rate alerts + dashboard rendered/parsed"
+
+render-order: ## V-T9: render the order base (Deployment+Service) + lint the stuck-order SLO/timer/DLQ alerts + dashboard
+	@set -e; root=$$PWD; f=$$root/.render-order.yaml; \
+	  $(KUSTOMIZE) build deploy/base/order > $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$f ); \
+	  grep -q 'name: order' $$f || { echo "render-order: order Deployment missing from render"; exit 1; }; \
+	  grep -q 'kind: Service' $$f || { echo "render-order: Service missing from render"; exit 1; }; \
+	  rm -f $$f; \
+	  ( cd tools/yamlcheck && $(GO) run . $$root/deploy/alerts/order.yaml && $(GO) run . $$root/deploy/dashboards/order.json ); \
+	  echo "render-order: order base (Deployment+Service) + stuck-order SLO/timer-fire/DLQ alerts + dashboard rendered/parsed"
 
 render-cart: ## V-T7: render the cart base (Deployment+Service) + lint the cart latency/revalidation/snapshot alerts + dashboard
 	@set -e; root=$$PWD; f=$$root/.render-cart.yaml; \

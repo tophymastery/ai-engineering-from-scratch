@@ -1,0 +1,86 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: order
+  labels:
+    app.kubernetes.io/part-of: shop-platform
+    team: marketplace
+    slice: V-T9
+    decisions: D22-D9
+spec:
+  groups:
+    # SLOs (V-T9):
+    #   - stuck-order ratio < 0.05%/day (orders wedged in a non-terminal state
+    #     past their timer windows — the headline saga health SLO)
+    #   - durable timers fire within 60s of due (the crash-survival guarantee)
+    #   - exactly-once money effects: zero duplicate charges, zero lost orders
+    #   - checkout p99 < 800 ms (01 §5)
+    - name: order.stuck
+      rules:
+        - alert: OrderStuckRatioHigh
+          # Stuck = non-terminal orders older than their remediation window,
+          # divided by daily order volume. SLO < 0.05%/day.
+          expr: sum(order_stuck_orders) / clamp_min(sum(increase(order_created_total[1d])), 1) > 0.0005
+          for: 15m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "stuck-order ratio > 0.05%/day (saga wedged)"
+            description: "Orders are stalling in a non-terminal state past their T_accept/T_dispatch/remediation windows above the 0.05%/day SLO. Check the durable-timer sweeper (is it firing? lease starvation?), the payment/dispatch consumers, and the inbox DLQ depth. Use the admin stuck-order console (GET /v1/admin/orders/stuck) + bulk-compensation. Runbook: docs/runbooks/order.md."
+
+    - name: order.timers
+      rules:
+        - alert: OrderTimerFireLagHigh
+          # The crash-survival SLO: a due durable timer must fire within 60s.
+          expr: histogram_quantile(0.99, sum(rate(order_timer_fire_lag_seconds_bucket[5m])) by (le)) > 60
+          for: 5m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "durable-timer fire lag p99 > 60s"
+            description: "Due timers (T_accept/T_dispatch/capture-by/remediation) are not firing within 60s of due — the saga stops progressing and stuck orders accrue. Check sweeper liveness + lease contention + DB latency on the timers table. Runbook: docs/runbooks/order.md."
+        - alert: OrderRemediationBacklog
+          expr: sum(order_timers_pending{kind="payment_remediation"}) > 0 and sum(rate(order_timer_fired_total{kind="payment_remediation"}[10m])) == 0
+          for: 20m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "PAYMENT_PENDING remediation timers pending but not firing"
+            description: "Remediation timers are queued but none have fired in 10m — stuck PAYMENT_PENDING orders may not be getting auto-voided within 16 min. Check the sweeper. Runbook: docs/runbooks/order.md."
+
+    - name: order.money
+      rules:
+        - alert: OrderDuplicateChargeDetected
+          # Money-path invariant (every slice): zero duplicate charges.
+          expr: sum(increase(order_duplicate_charge_total[1h])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            team: marketplace
+          annotations:
+            summary: "duplicate charge detected on the order saga"
+            description: "The D9 idempotency / inbox exactly-once path let a second charge through. This must be zero. Freeze the affected key range, inspect idempotency_keys + inbox, page Payments. Runbook: docs/runbooks/order.md."
+        - alert: OrderInboxDLQDepthHigh
+          expr: sum(order_inbox_dlq_depth) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "order consumer inbox DLQ not empty"
+            description: "payment/dispatch/driver events have exhausted retries and parked to the DLQ — saga transitions are being dropped. Inspect + replay with tools/dlqctl. Runbook: docs/runbooks/order.md."
+
+    - name: order.latency
+      rules:
+        - alert: OrderCheckoutLatencyHigh
+          expr: histogram_quantile(0.99, sum(rate(order_request_duration_seconds_bucket{route="/v1/orders"}[5m])) by (le)) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+            team: marketplace
+          annotations:
+            summary: "checkout p99 > 800ms"
+            description: "POST /v1/orders p99 latency budget (800ms, 01 §5) is burning. Check the idempotency DB path + outbox insert + payment authorize round-trip. Runbook: docs/runbooks/order.md."

@@ -7,8 +7,8 @@
 openapi: 3.0.3
 info:
   title: order
-  version: "1.0.0"
-  description: Order service — checkout, order detail, cancel, capture (02 §4.1).
+  version: "1.1.0"
+  description: "Order service — checkout, order detail, cancel, capture (02 §4.1). v1.1.0 (V-T9, additive per D30): the Order.status enum gains the full 01 §4 state-machine set (CREATED, QUOTED, PICKED_UP, SETTLED) — additive-only, and clients already tolerate unknown values (02 §1)."
 servers:
   - url: https://api.shop.io
 paths:
@@ -200,8 +200,8 @@ components:
         order_id: { type: string }
         status:
           type: string
-          description: "UPPER_SNAKE closed set; clients tolerate unknown values (02 §1)."
-          enum: [PAYMENT_PENDING, PAID, ACCEPTED, DISPATCHED, DELIVERED, CANCELLED]
+          description: "UPPER_SNAKE closed set; clients tolerate unknown values (02 §1). Full 01 §4 state machine."
+          enum: [CREATED, QUOTED, PAYMENT_PENDING, PAID, ACCEPTED, DISPATCHED, PICKED_UP, DELIVERED, SETTLED, CANCELLED]
         total: { $ref: "#/components/schemas/Money" }
         created_at: { type: string }
     Error:
