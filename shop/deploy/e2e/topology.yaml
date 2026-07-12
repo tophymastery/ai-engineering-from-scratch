@@ -58,7 +58,7 @@ services:
   # once the binary builds. The gateway routes /customer-bff/v1/orders* here
   # (checkout/get/cancel passthrough) and /order/v1/* directly.
   - { name: order,             port: 8105, mode: stub, contract: contracts/openapi/order.v1.yaml,             real_cmd: "bash tools/order-realcmd.sh" }
-  - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "" }
+  - { name: payment,           port: 8106, mode: stub, contract: contracts/openapi/payment.v1.yaml,           real_cmd: "bash tools/payment-realcmd.sh" }
   # pricing-promo is the V-T8 slice (D10): real_cmd boots the built binary
   # (tools/pricing-realcmd.sh, pricing_v1 on; CART_URL->cart slot for the
   # subtotal read, the pricing-promo->cart pact). `make e2e-sync` promotes it

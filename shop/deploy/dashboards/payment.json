@@ -1,0 +1,80 @@
+{
+  "__comment": "Grafana dashboard TEMPLATE for the V-T10 payment slice (D9 transaction-durable idempotency). Panels bind to the metrics payment exports (also driving deploy/alerts/payment.yaml): the authorization success rate (headline Payments SLO), money invariants (zero duplicate charges, zero lost orders), PSP failure rate + circuit-breaker state, authorize p99 (< 500ms vs sim), and webhook/inbox DLQ depth. Template (no datasource UID pinned) so it renders in any Grafana with a Prometheus source.",
+  "title": "Payment — authorize/capture/refund: auth rate, failures, exactly-once (V-T10)",
+  "uid": "payment-v-t10",
+  "tags": ["payments", "payment", "authorize", "capture", "refund", "idempotency", "exactly-once", "D9", "V-T10"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      { "name": "region", "type": "query", "query": "label_values(payment_authorized_total, region)", "includeAll": true, "multi": true }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Authorization success rate (SLO > 90%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 0.9 } ] } } },
+      "targets": [
+        { "expr": "sum(rate(payment_authorized_total{region=~\"$region\"}[10m])) / clamp_min(sum(rate(payment_authorized_total{region=~\"$region\"}[10m])) + sum(rate(payment_failed_total{region=~\"$region\"}[10m])), 1)", "legendFormat": "auth success rate" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Duplicate charges (invariant == 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(increase(payment_duplicate_charge_total{region=~\"$region\"}[1h]))", "legendFormat": "duplicate charges" },
+        { "expr": "sum(increase(payment_lost_charge_total{region=~\"$region\"}[1h]))", "legendFormat": "lost charges" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Money mutations by type (authorize/capture/refund/failed)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(payment_authorized_total{region=~\"$region\"}[5m]))", "legendFormat": "authorized" },
+        { "expr": "sum(rate(payment_captured_total{region=~\"$region\"}[5m]))", "legendFormat": "captured" },
+        { "expr": "sum(rate(payment_refunded_total{region=~\"$region\"}[5m]))", "legendFormat": "refunded" },
+        { "expr": "sum(rate(payment_failed_total{region=~\"$region\"}[5m]))", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "PSP error rate + circuit-breaker state",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "targets": [
+        { "expr": "sum(rate(payment_psp_error_total{region=~\"$region\"}[5m])) / clamp_min(sum(rate(payment_psp_call_total{region=~\"$region\"}[5m])), 1)", "legendFormat": "PSP error rate" },
+        { "expr": "max(payment_circuit_open{region=~\"$region\"})", "legendFormat": "circuit open" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Authorize p99 (SLO < 500ms vs sim)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.5 } ] } } },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(payment_request_duration_seconds_bucket{route=\"/v1/payments:authorize\",region=~\"$region\"}[5m])) by (le))", "legendFormat": "authorize p99" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Webhook / order-event inbox DLQ depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [
+        { "expr": "sum(payment_inbox_dlq_depth{region=~\"$region\"})", "legendFormat": "inbox DLQ depth" }
+      ]
+    }
+  ]
+}
